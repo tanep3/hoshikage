@@ -83,6 +83,7 @@ concurrency_semaphore = asyncio.Semaphore(1) # 同時実行数を1に制限
 last_access_time = time.time()
 # chat_session_manager = ChatSessionManager()
 current_model = ""
+current_model_config = {}
 IS_SEMAPHORE=False
 
 async def initialize_model(model_alias):
@@ -95,24 +96,17 @@ async def initialize_model(model_alias):
         llm.close()
         llm = None
         gc.collect()
-    ram_model_path = mt.get_model(current_model)
+    ram_model_path, config = mt.get_model(current_model)
+    global current_model_config
+    current_model_config = config
+    
     llm = Llama(
         model_path=ram_model_path, 
-        # n_ctx=20960,
-        # n_ctx=12288,
-        # n_ctx=10240,     # 文脈長：長めでもOK（4096が推奨最大）
-        # n_ctx=9126,
-        # n_ctx=8192,
-        # n_ctx=5120,
-        n_ctx=4096,
-        n_threads=20,    # Ryzen 7900のスレッド数に応じて（上限は自動でも良い）
+        n_ctx=8192,      # コンテキスト長を8192に拡張（最近のモデルの標準）
+        n_threads=12,    # スレッド数を少し控えめに（安定性重視）
         n_gpu_layers=-1, # -1はGPUをMaxまで使う
-        # n_gpu_layers=49, # -1はGPUをMaxまで使う
-        # n_batch=1024,         # 一度に処理するトークン数（大きいと高速・ただしVRAMに注意）
-        n_batch=512,
+        n_batch=1024,    # バッチサイズを1024に増加
         use_mmap=True,   # モデルファイルを RAM や VRAM に全て読み込む代わりに、ファイルシステムから直接メモリにマッピングして利用しようとします。
-        # type_k=7,     # デフォルトはf16
-        # offload_kqv=False,   # Attention 計算の一部 (K, Q, V の射影) を CPU に担当させる
         verbose=False    # 👈 出力を抑制
     )
 
@@ -161,12 +155,13 @@ def stream_generator(current_model, prompt, session_id):
     global IS_SEMAPHORE
     try:
         partial_text = ""
+        # 設定からstopシーケンスを取得
+        stop_tokens = current_model_config.get("stop", ["<|im_end|>", "</s>"])
+        
         for chunk in llm(
             prompt,
             max_tokens=2096,
-            stop=["<|eot|>", "user:", "<|user|>", "</|assistant|>", "<|endoftext|>", "Q:"],
-            # stop=["<|eot|>", "user:", "User:", "Assistant:", "assistant:"],
-            # "<|user|>","</|assistant|>"
+            stop=stop_tokens,
             stream=True
         ):
             delta = chunk.get("choices", [{}])[0].get("text", "")
@@ -203,10 +198,13 @@ def stream_generator(current_model, prompt, session_id):
 
 # 非ストリームイング用
 async def non_streaming_generator(current_model, prompt, session_id):
+    # 設定からstopシーケンスを取得
+    stop_tokens = current_model_config.get("stop", ["<|im_end|>", "</s>"])
+
     output = llm(
         prompt, 
         max_tokens=1024, 
-        stop=["<|eot|>", "<|endoftext|>", "user:", "Q:"],
+        stop=stop_tokens,
     )
     assistant_message = output["choices"][0]["text"]
 
@@ -311,8 +309,9 @@ async def create_completion(completion_data: ChatCompletionRequest):
     while IS_SEMAPHORE:
         if sleep_count > 1800: # 180秒待っても解放されない場合は強制終了
             IS_SEMAPHORE = False
-            LLM.close()
-            LLM = None
+            if llm:
+                llm.close()
+                llm = None
             gc.collect()
             break
         await asyncio.sleep(0.1)

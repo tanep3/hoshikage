@@ -86,7 +86,7 @@ def format_ollama_model(name, full_path):
     }
 
 
-def add_model(model_path, model_alias):
+def add_model(model_path, model_alias, stop_tokens_str=None):
     if not os.path.exists(model_path):
         print(f"❌ モデルファイルが存在しません: {model_path}")
         return
@@ -102,7 +102,24 @@ def add_model(model_path, model_alias):
         print(f"❌ モデル名 '{model_alias}' はすでに登録されています。")
         return
 
-    model_map[model_alias] = {"path": model_dir, "model": model_name}
+    # デフォルトのストップシーケンス（良く使われるもの）
+    default_stop = [
+        "<|eot|>", "user:", "<|user|>", "</|assistant|>", "<|endoftext|>", 
+        "Q:", "User:", "Assistant:", "assistant:", 
+        "<|im_end|>", "<|eot_id|>", "<|end_of_text|>", "</s>", "<|end|>",
+        "\n\n\n"
+    ]
+    
+    stop_tokens = default_stop
+    if stop_tokens_str:
+        # カンマ区切りで指定された場合
+        stop_tokens = [s.strip() for s in stop_tokens_str.split(",")]
+
+    model_map[model_alias] = {
+        "path": model_dir, 
+        "model": model_name,
+        "stop": stop_tokens
+    }
     formatted = format_openai_model(model_alias)
     formatted_ollama = format_ollama_model(model_alias, model_path)
     tags_cache.append(formatted)
@@ -150,13 +167,16 @@ def list_models():
     model_map = load_json(MODEL_MAP_FILE)
     print(f"📦 登録済みモデル一覧（{len(model_map)}件）:")
     for alias, conf in model_map.items():
-        model_path = os.path.join(conf["path"], conf["model"])
-        size = os.path.getsize(model_path) if os.path.exists(model_path) else 0
-        print(f" - {alias}: {model_path} ({size / 1024 / 1024:.2f} MB)")
+        if isinstance(conf, dict) and "path" in conf and "model" in conf:
+            model_path = os.path.join(conf["path"], conf["model"])
+            size = os.path.getsize(model_path) if os.path.exists(model_path) else 0
+            print(f" - {alias}: {model_path} ({size / 1024 / 1024:.2f} MB)")
+        else:
+            print(f" - {alias}: (無効な設定)")
 
 def usage():
     print("使い方: python hoshikage.py [add|remove|list] ...")
-    print("add [モデルのフルパス] [alias]")
+    print("add [モデルのフルパス] [alias] [stop_tokens(option:comma_separated)]")
     print("remove [alias]")
     print("list")
     return
@@ -167,8 +187,9 @@ def main():
         return
 
     command = sys.argv[1]
-    if command == "add" and len(sys.argv) == 4:
-        add_model(sys.argv[2], sys.argv[3])
+    if command == "add" and len(sys.argv) >= 4:
+        stop_tokens_str = sys.argv[4] if len(sys.argv) > 4 else None
+        add_model(sys.argv[2], sys.argv[3], stop_tokens_str)
     elif command == "remove" and len(sys.argv) == 3:
         remove_model(sys.argv[2])
     elif command == "list":

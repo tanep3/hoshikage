@@ -26,7 +26,7 @@ RAMDISK_PATH = os.getenv("RAMDISK_PATH", "/mnt/temp/hoshikage")
 MODEL_MAP_FILE = get_env_path("MODEL_MAP_FILE", "data/model_map.json")
 RAMDISK_SIZE = int(os.getenv("RAMDISK_SIZE", 12))  # デフォルトは12GB
 
-def get_model_path(model_alias):
+def get_model_info(model_alias):
     if not os.path.exists(MODEL_MAP_FILE):
         raise FileNotFoundError(f"モデルマップファイルが見つかりません: {MODEL_MAP_FILE}")
     with open(MODEL_MAP_FILE, "r") as f:
@@ -34,17 +34,17 @@ def get_model_path(model_alias):
         model_data = model_maps.get(model_alias, {})
         model = model_data.get("model", None)
         path = model_data.get("path", None)
+        # 設定情報も含めて返す
+        config = model_data
         if model is None or path is None:
-            return None
+            return None, {}
         source_model_path = os.path.join(path, model)
         ramdisk_model_path = os.path.join(RAMDISK_PATH, model)
-        return source_model_path, ramdisk_model_path
+        return source_model_path, ramdisk_model_path, config
 
 def is_mounted(path):
     """指定パスがマウントされているか確認"""
     return os.path.ismount(path)
-    # result = subprocess.run(["mountpoint", "-q", path])
-    # return result.returncode == 0
 
 def mount_ramdisk(size_gb=10):
     """
@@ -96,13 +96,13 @@ def prepare_ram_model(source_model_path):
         copy_model(source_model_path)
 
 def get_model(model_alias):
-    source_model_path, ramdisk_model_path = get_model_path(model_alias)
+    source_model_path, ramdisk_model_path, config = get_model_info(model_alias)
     if is_mounted(RAMDISK_PATH):
         if os.path.exists(ramdisk_model_path):
             logger.info("✅ Ramdisk上にモデルが既に存在しています")
-            return ramdisk_model_path
+            return ramdisk_model_path, config
     prepare_ram_model(source_model_path)
-    return ramdisk_model_path
+    return ramdisk_model_path, config
     
 # prepare_ram_model(None)
 # unmount_ramdisk()

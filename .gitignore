@@ -36,3 +36,9 @@ Thumbs.db
 
 # 環境変数（※.env は ignore、env.exampleをコピーして使う）
 .env
+
+# プロジェクト固有
+old/
+data/*
+!data/.gitkeep
+hoshikage_chroma_db/
