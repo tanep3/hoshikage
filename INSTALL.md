@@ -172,6 +172,27 @@ curl -X POST http://localhost:3030/v1/chat/completions \
   }'
 ```
 
+### 10. モデルの登録（ストップシーケンス対応）
+
+モデルを登録する際、そのモデル固有の**ストップトークン**（生成停止合図）を指定できます。特に **ChatML形式** や **Llama 3** などを使用する場合は重要です。
+
+基本コマンド:
+```bash
+python hoshikage.py add [モデルパス] [モデル名] [ストップトークン(カンマ区切り)]
+```
+
+**LiquidAI LFM2.5 (ChatML形式) の例:**
+ChatML形式では `<|im_end|>` が必須です。
+```bash
+python hoshikage.py add \
+  /home/tane/datas/LLM/LFM/LFM2.5-1.2B-JP-Q8_0.gguf \
+  LFM2.5_Q8 \
+  "<|im_end|>,<|eot_id|>"
+```
+
+※ ストップトークンを省略した場合でも、主要なトークン（`<|im_end|>`, `</s>`など）が自動的にデフォルト値として設定されますが、モデル固有の特殊なタグがある場合は明示的に指定してください。
+```
+
 ---
 
 ## 本番環境デプロイ
