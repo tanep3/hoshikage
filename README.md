@@ -71,6 +71,33 @@
 - **Python**: 3.10以上
 - **CUDA**: 11.8以上（GPU使用時）
 - **sudo権限**: RAMディスクマウント時に必要
+- **Docker**: 20.10以上（Docker使用時）
+- **NVIDIA Container Toolkit**: GPU使用時（Docker使用時）
+
+#### NVIDIA Container Toolkitのインストール（DockerでGPUを使用する場合）
+
+DockerでGPUを使用するには、NVIDIA Container Toolkitをインストールする必要があります。
+
+```bash
+# NVIDIA Container Toolkitのリポジトリを追加
+distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
+curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+
+# パッケージリストを更新
+sudo apt-get update
+
+# NVIDIA Container Toolkitをインストール
+sudo apt-get install -y nvidia-container-toolkit
+
+# Dockerを再起動
+sudo systemctl restart docker
+
+# インストールを確認
+docker run --rm --gpus all nvidia/cuda:11.6.2-base-ubuntu20.04 nvidia-smi
+```
+
+詳細なインストール手順は、[NVIDIA Container Toolkitの公式ドキュメント](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)を参照してください。
 
 ---
 
@@ -84,7 +111,6 @@ git clone https://github.com/yourusername/hoshikage.git
 cd hoshikage
 
 # 依存関係をインストール
-cd src
 pip install -r requirements.txt
 ```
 
@@ -111,18 +137,26 @@ IDLE_TIMEOUT_SECONDS=300
 GREAT_TIMEOUT=60
 
 # モデル管理
-MODEL_MAP_FILE=./src/models/model_map.json
-TAG_CACHE_FILE=./src/models/tags_cache.json
-TAG_OLLAMA_FILE=./src/models/tags_ollama.json
+MODEL_MAP_FILE=./data/model_map.json
+TAG_CACHE_FILE=./data/tags_cache.json
+TAG_OLLAMA_FILE=./data/tags_ollama.json
 
 # ChromaDB設定
 CHROMA_PATH=./data/hoshikage_chroma_db
 SENTENCE_BERT_MODEL=cl-nagoya/ruri-small-v2
+
+# クラスタリング設定
+CLUSTER_DIVISOR=100
+MIN_CLUSTERS=1
+MAX_CLUSTERS=20
 ```
 
 ### 3. モデルの登録
 
 ```bash
+# srcディレクトリに移動
+cd src
+
 # モデルを登録
 python hoshikage.py add /path/to/your/model.gguf your-model-name
 
@@ -133,6 +167,9 @@ python hoshikage.py list
 ### 4. サーバーの起動
 
 ```bash
+# srcディレクトリに移動
+cd src
+
 # サーバーを起動
 uvicorn main:app --host 0.0.0.0 --port 8000
 
@@ -155,6 +192,24 @@ curl -X POST http://localhost:8000/v1/chat/completions \
     "stream": false
   }'
 ```
+
+### 6. Dockerで実行する場合
+
+```bash
+# Dockerイメージをビルド
+docker-compose build
+
+# コンテナを起動
+docker-compose up -d
+
+# ログを確認
+docker-compose logs -f
+
+# コンテナを停止
+docker-compose down
+```
+
+**注意**: DockerでGPUを使用するには、NVIDIA Container Toolkitをインストールする必要があります。詳細は「必要要件」セクションを参照してください。
 
 ---
 
@@ -185,10 +240,16 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 | `GREAT_TIMEOUT` | RAMディスクアンマウント閾値（分） | `60` |
 | `CHROMA_PATH` | ChromaDBデータパス | `./data/hoshikage_chroma_db` |
 | `SENTENCE_BERT_MODEL` | 埋め込みモデル名 | `cl-nagoya/ruri-small-v2` |
+| `CLUSTER_DIVISOR` | クラスタ数計算の除数 | `100` |
+| `MIN_CLUSTERS` | 最小クラスタ数 | `1` |
+| `MAX_CLUSTERS` | 最大クラスタ数 | `20` |
 
 ### モデル管理
 
 ```bash
+# srcディレクトリに移動
+cd src
+
 # モデルを追加
 python hoshikage.py add <モデルパス> <エイリアス>
 
@@ -237,6 +298,22 @@ stream = client.chat.completions.create(
 for chunk in stream:
     if chunk.choices[0].delta.content:
         print(chunk.choices[0].delta.content, end="", flush=True)
+```
+
+### cURL
+
+```bash
+# ステータス確認
+curl http://localhost:8000/v1/status
+
+# チャット補完
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "your-model-name",
+    "messages": [{"role": "user", "content": "こんにちは"}],
+    "stream": false
+  }'
 ```
 
 ---

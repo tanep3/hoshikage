@@ -3,6 +3,9 @@ from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 import math
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 def split_and_clean_sentences(text: str) -> list[str]:
     """
@@ -98,54 +101,74 @@ def format_clustered_representatives(representatives: list[tuple[int, int, str]]
 
     return '\n'.join(markdown)
 
-def select_sentence_representatives(sentences: list[str], embedder) -> list[str]:
+def select_sentence_representatives(
+    sentences: list[str],
+    embedder,
+    cluster_divisor: int = 100,
+    min_clusters: int = 1,
+    max_clusters: int = 20
+) -> list[str]:
     """
     意味クラスタリングによる代表文抽出（等間隔 + 意味順ソート）
 
     Parameters:
     - sentences (List[str]): 分割・クレンジング済みの文リスト
     - embedder (Callable): __call__ で文リストをベクトル化できる関数（ruriインスタンス）
+    - cluster_divisor (int): クラスタ数を計算するための除数（デフォルト: 100）
+    - min_clusters (int): 最小クラスタ数（デフォルト: 1）
+    - max_clusters (int): 最大クラスタ数（デフォルト: 20）
 
     Returns:
     - List[str]: クラスタ単位で意味順に並べられた代表文リスト
     """
+    try:
+        if not sentences:
+            return []
 
-    if not sentences:
-        return []
+        # ベクトル化
+        vecs = np.array(embedder(sentences))
 
-    # ベクトル化
-    vecs = np.array(embedder(sentences))
+        # クラスタ数決定
+        k = max(min_clusters, min(max_clusters, len(sentences) // cluster_divisor))
+        logger.info(f"クラスタ数: {k}（文数: {len(sentences)}）")
 
-    # クラスタ数決定
-    # k = max(10, len(sentences) // 100)
-    k = max(1, len(sentences) // 100)
-    print(f"クラスタ数: {k}（文数: {len(sentences)}）")
+        # クラスタリング
+        kmeans = KMeans(n_clusters=k, n_init="auto", random_state=42)
+        cluster_ids = kmeans.fit_predict(vecs)
 
-    # クラスタリング
-    kmeans = KMeans(n_clusters=k, n_init="auto", random_state=42)
-    cluster_ids = kmeans.fit_predict(vecs)
+        # 各クラスタごとに代表文を抽出（意味順出力のためクラスタ順にまとめる）
+        representatives = []
+        for cluster_id in range(k):
+            indices = [i for i, cid in enumerate(cluster_ids) if cid == cluster_id]
+            if not indices:
+                continue
 
-    # 各クラスタごとに代表文を抽出（意味順出力のためクラスタ順にまとめる）
-    representatives = []
-    for cluster_id in range(k):
-        indices = [i for i, cid in enumerate(cluster_ids) if cid == cluster_id]
-        if not indices:
-            continue
+            cluster_vecs = vecs[indices]
+            centroid = kmeans.cluster_centers_[cluster_id].reshape(1, -1)
+            sims = cosine_similarity(cluster_vecs, centroid).flatten()
+            sorted_pairs = sorted(zip(sims, indices), reverse=True)
 
-        cluster_vecs = vecs[indices]
-        centroid = kmeans.cluster_centers_[cluster_id].reshape(1, -1)
-        sims = cosine_similarity(cluster_vecs, centroid).flatten()
-        sorted_pairs = sorted(zip(sims, indices), reverse=True)
+            n_extract = min(math.ceil(len(indices) / 10), 5)
+            logger.debug(f"クラスタ {cluster_id} の文数: {len(indices)}、代表文数: {n_extract}")
+            step = max(1, len(sorted_pairs) // n_extract)
 
-        n_extract = min(math.ceil(len(indices) / 10), 5)
-        print(f"クラスタ {cluster_id} の文数: {len(indices)}、代表文数: {n_extract}")
-        step = max(1, len(sorted_pairs) // n_extract)
+            selected = [sorted_pairs[i * step][1] for i in range(n_extract)]
+            # (クラスタID, 元文インデックス, 文) を保存
+            representatives.extend((cluster_id, i, sentences[i]) for i in selected)
 
-        selected = [sorted_pairs[i * step][1] for i in range(n_extract)]
-        # (クラスタID, 元文インデックス, 文) を保存
-        representatives.extend((cluster_id, i, sentences[i]) for i in selected)
+        # クラスタ順 → インデックス順 で並べ替え
+        representatives.sort(key=lambda x: (x[0], x[1]))
 
-    # クラスタ順 → インデックス順 で並べ替え
-    representatives.sort(key=lambda x: (x[0], x[1]))
-
-    return format_clustered_representatives(representatives)
+        return format_clustered_representatives(representatives)
+    
+    except ValueError as e:
+        logger.error(f"クラスタリング中に値エラーが発生しました: {e}")
+        # クラスタリング失敗時は、等間隔で代表文を抽出
+        logger.info("クラスタリングに失敗したため、等間隔で代表文を抽出します")
+        step = max(1, len(sentences) // 10)
+        selected_indices = list(range(0, len(sentences), step))[:10]
+        representatives = [(0, i, sentences[i]) for i in selected_indices]
+        return format_clustered_representatives(representatives)
+    except Exception as e:
+        logger.error(f"代表文抽出中に予期しないエラーが発生しました: {e}")
+        raise

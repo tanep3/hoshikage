@@ -38,15 +38,32 @@ TAG_OLLAMA_FILE = get_env_path("TAG_OLLAMA_FILE", "data/tags_ollama.json")
 
 
 def load_json(filepath):
+    """JSONファイルを読み込む"""
     if not os.path.exists(filepath):
         return {}
-    with open(filepath, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"❌ JSONファイルの読み込みに失敗しました: {filepath}")
+        print(f"   エラー: {e}")
+        return {}
+    except Exception as e:
+        print(f"❌ ファイルの読み込みに失敗しました: {filepath}")
+        print(f"   エラー: {e}")
+        return {}
 
 
 def save_json(filepath, data):
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """JSONファイルに書き込む"""
+    try:
+        # ディレクトリが存在しない場合は作成
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"❌ ファイルの書き込みに失敗しました: {filepath}")
+        print(f"   エラー: {e}")
 
 def format_openai_model(name):
     return {
@@ -65,8 +82,60 @@ def get_file_metadata(full_path):
     return size, modified_at, digest
 
 def format_ollama_model(name, full_path):
-    # llm = Llama(model_path=full_path, vocab_only=True, verbose=False)
-    # meta = llm.metadata
+    """Ollama互換のモデル情報を作成する"""
+    # モデルメタデータを取得
+    parameter_size = "Unknown"
+    quantization_level = "Unknown"
+    
+    try:
+        # モデルメタデータを取得
+        llm = Llama(model_path=full_path, vocab_only=True, verbose=False)
+        meta = llm.metadata
+        
+        # パラメータサイズを推定
+        if "llama.context_length" in meta:
+            # GGUFメタデータから推定
+            # 一般的なGGUFモデルのパラメータサイズ推定ロジック
+            total_size = os.path.getsize(full_path)
+            if total_size > 20 * 1024 * 1024 * 1024:  # 20GB以上
+                parameter_size = "70B"
+            elif total_size > 15 * 1024 * 1024 * 1024:  # 15GB以上
+                parameter_size = "34B"
+            elif total_size > 10 * 1024 * 1024 * 1024:  # 10GB以上
+                parameter_size = "13B"
+            elif total_size > 7 * 1024 * 1024 * 1024:  # 7GB以上
+                parameter_size = "7B"
+            elif total_size > 4 * 1024 * 1024 * 1024:  # 4GB以上
+                parameter_size = "3B"
+            else:
+                parameter_size = "1B"
+        
+        # 量子化レベルを推定
+        if "general.file_type" in meta:
+            file_type = meta["general.file_type"]
+            quantization_map = {
+                0: "F32",
+                1: "F16",
+                2: "Q4_0",
+                3: "Q4_1",
+                6: "Q5_0",
+                7: "Q5_1",
+                8: "Q8_0",
+                9: "Q8_1",
+                10: "Q2_K",
+                11: "Q3_K",
+                12: "Q4_K",
+                13: "Q5_K",
+                14: "Q6_K",
+                15: "Q8_K"
+            }
+            quantization_level = quantization_map.get(file_type, "Unknown")
+        
+        llm.close()
+    except Exception as e:
+        print(f"⚠️  モデルメタデータの取得に失敗しました: {e}")
+        print(f"   デフォルト値を使用します")
+    
     size, modified_at, digest = get_file_metadata(full_path)
 
     return {
@@ -76,12 +145,11 @@ def format_ollama_model(name, full_path):
         "size": size,
         "digest": digest,
         "details": {
-            # "parent_model": "",
             "format": "gguf",
             "family": "llama",
             "families": "null",
-            "parameter_size": "12B",
-            "quantization_level": "Q4_0"
+            "parameter_size": parameter_size,
+            "quantization_level": quantization_level
         }
     }
 
