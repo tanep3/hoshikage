@@ -1,0 +1,18 @@
+{
+  "models": [
+    {
+      "name": "LFM2.5_Q8",
+      "model": "LFM2.5_Q8:latest",
+      "modified_at": "2026-01-16T11:08:14.118703",
+      "size": 1246254016,
+      "digest": "60585553df37d8fa396368aef63ffeb236b2fe7c6b430652307a006e0f451e2c",
+      "details": {
+        "format": "gguf",
+        "family": "llama",
+        "families": "null",
+        "parameter_size": "12B",
+        "quantization_level": "Q4_0"
+      }
+    }
+  ]
+}

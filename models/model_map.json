@@ -1,0 +1,6 @@
+{
+  "LFM2.5_Q8": {
+    "path": "/home/tane/datas/LLM/LFM",
+    "model": "LFM2.5-1.2B-JP-Q8_0.gguf"
+  }
+}
