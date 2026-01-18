@@ -39,7 +39,7 @@ graph TB
 | **APIサーバー** | OpenAI互換APIを提供 | Axum + Tokio |
 | **推論エンジン** | GGUFモデルの高速推論 | llama.cpp (動的リンク: libllama.so) |
 | **モデル管理** | モデル情報の永続化 | serde_json |
-| **リソース管理** | 非同期排他制御 | Tokio Mutex + Semaphore |
+| **リソース管理** | 非同期排他制御 | Tokio RwLock + Mutex + Semaphore |
 | **I/O管理** | RAMディスク転送 (/dev/shm) | Std I/O + Tokio fs |
 
 ---
@@ -48,7 +48,7 @@ graph TB
 
 ### 2.1 非同期処理
 
-**パターン:** Tokioベースの非同期処理
+**パターン:** Tokioベースの非同期処理 + RwLock
 
 **理由:**
 - 高速なI/O待機
@@ -56,32 +56,32 @@ graph TB
 - リソースの効率的な使用
 
 ```rust
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock, Semaphore};
 
 pub struct ModelManager {
-    llm: Arc<Mutex<Option<Llama>>>,
-    semaphore: Arc<Semaphore<1>>,
+    models: Arc<RwLock<HashMap<String, ModelConfig>>>,
+    inference: Arc<Mutex<InferenceState>>,
+    semaphore: Arc<Semaphore>,
 }
 ```
 
 ### 2.2 排他制御
 
-**パターン:** Mutex + Semaphore
+**パターン:** RwLock + Mutex + Semaphore
 
 **理由:**
 - モデル排他制御: Mutex（1つのモデルのみロード）
 - 同時実行制限: Semaphore（VRAM枯渇防止）
 
 ```rust
-// モデル初期化（排他）
-let mut llm_guard = model_manager.llm.lock().await;
-if llm_guard.is_none() {
-    *llm_guard = Some(load_model(&model_path)?);
-}
+// モデル一覧参照（並行読み取り）
+let models = model_manager.models.read().await;
+let config = models.get(&name).cloned();
+drop(models);
 
 // 推論実行（セマフォ）
 let permit = model_manager.semaphore.acquire().await?;
-run_inference(&llm, &prompt).await?;
+run_inference(&prompt).await?;
 drop(permit);
 ```
 
@@ -136,6 +136,8 @@ pub type Result<T> = std::result::Result<T, HoshikageError>;
   }
 }
 ```
+
+`stop` はデフォルトのストップシーケンスにマージされ、重複は除去されます。
 
 ### 3.2 内部データ構造
 
@@ -202,6 +204,9 @@ async fn idle_timeout_check(
 }
 ```
 
+**補足:**
+推論ごとにコンテキストを初期化（KVキャッシュのクリアまたは再生成）し、前回の会話状態が次のリクエストに影響しないようにします。
+
 ### 4.2 VRAM管理
 
 **戦略:**
@@ -211,7 +216,7 @@ async fn idle_timeout_check(
 ### 4.3 RAMディスク活用 (高速ロード)
 
 **戦略 (Linux):**
-Linux標準の共有メモリ領域 `/dev/shm` (tmpfs) を活用します。これは全ユーザーから読み書き可能なメモリ領域であるため、`sudo` 権限なしで利用可能です。
+Linux標準の共有メモリ領域 `/dev/shm` (tmpfs) を活用します。これは全ユーザーから読み書き可能なメモリ領域であるため、`sudo` 権限なしで利用可能です。マウント操作は行いません。
 
 1. **クリーンアップ**: ロード要求時、`RAMDISK_PATH/` 内に *別のモデルファイル* が存在する場合は即座に削除し、メモリ領域を確保する（排他利用）。
 2. **コピー**: 対象の `.gguf` ファイルをRAMディスクにコピー。
@@ -221,7 +226,7 @@ Linux標準の共有メモリ領域 `/dev/shm` (tmpfs) を活用します。こ�
    - これによりメモリがOSに即座に返却されます。
 
 **Windows / Mac:**
-標準でユーザー書き込み可能なRAMディスク領域がないため、本機能はデフォルトで無効化（SSDから直接ロード）となります。WindowsでImDisk等を使用している場合はパス指定により利用可能です。
+標準でユーザー書き込み可能なRAMディスク領域がないため、本機能は無効化（SSDから直接ロード）となります。
 
 ---
 
@@ -293,4 +298,3 @@ src/
 - **出力先**: 標準出力 (デフォルト)
 - **ファイル出力**: `LOG_FILE_PATH` が設定されている場合、指定パス（例: `~/.config/hoshikage/logs/hoshikage.log`）に追記出力。
 - **ローテーション**: 日次ローテーションを行い、ディスク圧迫を防ぐ。
-
