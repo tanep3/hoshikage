@@ -70,6 +70,9 @@ GGUFモデルを `models/` ディレクトリに配置し、`~/.config/hoshikage
 }
 ```
 
+`stop` はデフォルトのストップシーケンスにマージされ、重複は除去されます。
+デフォルトには `<|im_start|>`, `<|im_end|>`, `</s>`, `<|eot_id|>`, `<|endoftext|>` が含まれます。
+
 **例:**
 ```bash
 mkdir -p models
@@ -127,27 +130,38 @@ hoshikage list
 # サーバーポート
 PORT=3030
 
+# ログファイル出力パス (ファイルパスとして扱う)
+# 例: ~/.config/hoshikage/logs/hoshikage.log
+# 出力は日次ローテーションされ、LOG_FILE_PATH.YYYY-MM-DD になります。
+# LOG_FILE_PATH=~/.config/hoshikage/logs/hoshikage.log
+
 # 非アクティブ時の自動アンロードまでの時間 (秒)
 # 0 にすると自動アンロード無効（デフォルト: 300）
 IDLE_TIMEOUT=300
 
 # RAMディスク設定 (高速ロード用)
 # Linuxの場合: /dev/shm (デフォルト) を使用するため設定不要です。sudo権限も不要です。
-# Windowsの場合: 任意のRAMドライブパス (例: R:/temp) を指定してください。
-# 設定しない場合、自動的にSSDからの直接ロードになります。
+# Windows / Mac はRAMディスク非対応のため、自動的にSSDからの直接ロードになります。
 RAMDISK_PATH=/dev/shm
-
-# RAMディスクサイズ (GB) - Windows等で動的確保する場合の目安
-# Linux(/dev/shm)使用時はOSが自動管理するため無視されます
-RAMDISK_SIZE=12
 
 # 長時間非アクティブ時のRAMディスク解放 (分)
 # メモリを完全にOSに返すまでの時間（デフォルト: 60分）
 GREAT_TIMEOUT=60
 
+# コンテキスト長 (トークン数)
+# デフォルト: 4096
+N_CTX=4096
+
+# 生成パラメータ
+# デフォルト: TEMPERATURE=0.2, TOP_P=0.8
+TEMPERATURE=0.2
+TOP_P=0.8
+
 ```
 
 詳細なパラメータは、プロジェクトに含まれる `.env.example` を参照してください。
+
+`LOG_FILE_PATH` を指定しない場合、ログは標準出力/標準エラーに出力されます。
 
 ---
 
@@ -230,7 +244,7 @@ curl -X POST http://localhost:3030/v1/chat/completions \
     "messages": [
       {"role": "user", "content": "こんにちは、よろしくお願いします。"}
     ],
-    "temperature": 0.7,
+    "temperature": 0.2,
     "max_tokens": 256,
     "stream": false
   }'
@@ -269,7 +283,7 @@ response = client.chat.completions.create(
         {"role": "system", "content": "あなたは親切なAIアシスタントです。"},
         {"role": "user", "content": "こんにちは"}
     ],
-    temperature=0.7
+    temperature=0.2
 )
 
 print(response.choices[0].message.content)

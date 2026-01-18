@@ -38,8 +38,8 @@
       "content": "string"
     }
   ],
-  "temperature": 0.7,
-  "top_p": 0.9,
+  "temperature": 0.2,
+  "top_p": 0.8,
   "max_tokens": 256,
   "stream": false,
   "presence_penalty": 0.0,
@@ -53,8 +53,8 @@
 |-----------|------|--------|------|-------------|
 | model | string | はい | モデル名（エイリアス） | - |
 | messages | array | はい | 会話メッセージの配列 | - |
-| temperature | number | いいえ | 0.0-2.0、高いほどランダム | 0.7 |
-| top_p | number | いいえ | 0.0-1.0、トークンサンプリング | 0.9 |
+| temperature | number | いいえ | 0.0-2.0、高いほどランダム | 0.2 |
+| top_p | number | いいえ | 0.0-1.0、トークンサンプリング | 0.8 |
 | max_tokens | number | いいえ | 生成する最大トークン数 | 1024 |
 | stream | boolean | いいえ | ストリーミング応答を有効化 | false |
 | presence_penalty | number | いいえ | 新しいトピックへのペナルティ | 0.0 |
@@ -99,6 +99,10 @@ data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1695123
 
 data: [DONE]
 ```
+
+**補足:**
+- `max_tokens` は非ストリーミングで最大 1024、ストリーミングで最大 2096 に制限されます。
+- `temperature` / `top_p` が省略された場合はサーバー設定のデフォルト値が使用されます。
 
 **ステータスコード:**
 
@@ -287,4 +291,4 @@ for chunk in stream:
 - 同時接続数: 1リクエスト（VRAM枯渇防止のため）
 - 最大コンテキスト長: モデル依存（通常4096-8192トークン）
 - 最大トークン生成数: 1024トークン（非ストリーミング）、2096トークン（ストリーミング）
-
+- ストップシーケンスはデフォルト値と `model_map.json` の `stop` をマージして適用
