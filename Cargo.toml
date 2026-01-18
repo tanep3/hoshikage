@@ -10,11 +10,13 @@ authors = ["Tane Channel Technology"]
 clap = { version = "4.5", features = ["derive", "env"] }
 
 # Webサーバー
-axum = { version = "0.7", features = ["multipart"] }
+axum = { version = "0.7", features = ["multipart", "macros"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 hyper = { version = "1", features = ["full"] }
+futures-util = "0.3"
+utoipa = { version = "4", features = ["axum_extras"] }
 
 # HTTPクライアント (CLI -> Server通信用)
 reqwest = { version = "0.11", features = ["json"] }
@@ -40,6 +42,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 dirs = "5"
+async-stream = "0.3"
+rand = "0.8"
 
 # エラーハンドリング
 anyhow = "1"

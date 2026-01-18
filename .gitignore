@@ -39,18 +39,10 @@ Thumbs.db
 
 # プロジェクト固有
 old/
-data/*
-!data/.gitkeep
-hoshikage_chroma_db/
+legacy_python/
+
 # 環境変数（ユーザー固有）
 .env
-
-# データディレクトリ
-data/
-data/hoshikage_chroma_db/
-
-# モデルファイル
-models/
 
 # 依存関係
 venv/
@@ -62,7 +54,9 @@ Thumbs.db
 
 # AI エージェント関連
 AGENTS.md
-legacy_python/
+.opencode/
+.serena/
+.spec-workflow/
 
 # 設定ファイルはユーザー固有のためGit管理から除外
 # 実際の設定は ~/.config/hoshikage/ に保存されます
