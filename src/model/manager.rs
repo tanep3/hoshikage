@@ -145,6 +145,14 @@ impl ModelManager {
         self.config.default_top_p
     }
 
+    pub fn default_repeat_penalty(&self) -> f32 {
+        self.config.repeat_penalty
+    }
+
+    pub fn default_repeat_last_n(&self) -> u32 {
+        self.config.repeat_last_n
+    }
+
     pub fn start_idle_monitor(self: Arc<Self>) {
         let idle_timeout = self.config.idle_timeout;
         let great_timeout = self.config.great_timeout;

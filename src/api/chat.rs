@@ -27,6 +27,10 @@ pub struct ChatCompletionRequest {
     pub presence_penalty: Option<f32>,
     #[serde(default)]
     pub frequency_penalty: Option<f32>,
+    #[serde(default)]
+    pub repeat_penalty: Option<f32>,
+    #[serde(default)]
+    pub repeat_last_n: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +171,14 @@ pub async fn chat_completion(
         top_p: req.top_p.unwrap_or(manager.default_top_p()),
         max_tokens,
         stop_sequences,
+        presence_penalty: req.presence_penalty.unwrap_or(0.0),
+        frequency_penalty: req.frequency_penalty.unwrap_or(0.0),
+        repeat_penalty: req
+            .repeat_penalty
+            .unwrap_or(manager.default_repeat_penalty()),
+        repeat_last_n: req
+            .repeat_last_n
+            .unwrap_or(manager.default_repeat_last_n()) as usize,
     };
 
     if stream_response {
@@ -358,6 +370,8 @@ mod tests {
             stream: None,
             presence_penalty: None,
             frequency_penalty: None,
+            repeat_penalty: None,
+            repeat_last_n: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();

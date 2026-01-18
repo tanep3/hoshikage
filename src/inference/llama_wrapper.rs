@@ -4,6 +4,7 @@ use crate::ffi::*;
 use crate::inference::loader::DynamicLibraryLoader;
 use libloading::Symbol;
 use rand::Rng;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, CString};
 use std::path::PathBuf;
 use std::sync::Once;
@@ -79,6 +80,10 @@ pub struct InferenceParams {
     pub top_p: f32,
     pub max_tokens: i32,
     pub stop_sequences: Vec<String>,
+    pub presence_penalty: f32,
+    pub frequency_penalty: f32,
+    pub repeat_penalty: f32,
+    pub repeat_last_n: usize,
 }
 
 impl Default for InferenceParams {
@@ -88,6 +93,10 @@ impl Default for InferenceParams {
             top_p: 0.9,
             max_tokens: 1024,
             stop_sequences: Vec::new(),
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
+            repeat_penalty: 1.0,
+            repeat_last_n: 0,
         }
     }
 }
@@ -157,6 +166,59 @@ fn sample_token(logits: &[f32], temperature: f32, top_p: f32) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+fn apply_penalties(
+    logits: &mut [f32],
+    counts: &HashMap<i32, u32>,
+    presence_penalty: f32,
+    frequency_penalty: f32,
+) {
+    if (presence_penalty == 0.0 && frequency_penalty == 0.0) || logits.is_empty() {
+        return;
+    }
+
+    for (token, count) in counts {
+        if *count == 0 {
+            continue;
+        }
+        let idx = *token as usize;
+        if idx >= logits.len() {
+            continue;
+        }
+        if presence_penalty != 0.0 {
+            logits[idx] -= presence_penalty;
+        }
+        if frequency_penalty != 0.0 {
+            logits[idx] -= frequency_penalty * (*count as f32);
+        }
+    }
+}
+
+fn apply_repeat_penalty(logits: &mut [f32], recent_tokens: &[i32], repeat_penalty: f32) {
+    if repeat_penalty == 1.0 || recent_tokens.is_empty() || logits.is_empty() {
+        return;
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for &token in recent_tokens {
+        if token < 0 {
+            continue;
+        }
+        if !seen.insert(token) {
+            continue;
+        }
+        let idx = token as usize;
+        if idx >= logits.len() {
+            continue;
+        }
+        let logit = logits[idx];
+        logits[idx] = if logit < 0.0 {
+            logit * repeat_penalty
+        } else {
+            logit / repeat_penalty
+        };
+    }
 }
 
 impl LlamaWrapper {
@@ -481,9 +543,19 @@ impl LlamaWrapper {
             let n_tokens = n_tokens as usize;
             let mut result = String::new();
             let mut position: i32 = 0;
+            let mut token_counts: HashMap<i32, u32> = HashMap::new();
+            let mut recent_tokens: VecDeque<i32> = VecDeque::new();
+            let repeat_last_n = params.repeat_last_n.min(8192);
 
             for i in 0..n_tokens {
                 let mut token = tokens[i];
+                *token_counts.entry(token).or_insert(0) += 1;
+                if repeat_last_n > 0 {
+                    recent_tokens.push_back(token);
+                    if recent_tokens.len() > repeat_last_n {
+                        recent_tokens.pop_front();
+                    }
+                }
                 let mut pos = position;
                 let mut seq_id: llama_seq_id = 0;
                 let mut seq_id_ptr: *mut llama_seq_id = &mut seq_id;
@@ -524,7 +596,26 @@ impl LlamaWrapper {
                 }
                 let logits_slice =
                     std::slice::from_raw_parts(logits_ptr, vocab_size as usize);
-                let token = sample_token(logits_slice, params.temperature, params.top_p)?;
+                let mut adjusted_logits = logits_slice.to_vec();
+                apply_penalties(
+                    &mut adjusted_logits,
+                    &token_counts,
+                    params.presence_penalty,
+                    params.frequency_penalty,
+                );
+                if repeat_last_n > 0 {
+                    apply_repeat_penalty(
+                        &mut adjusted_logits,
+                        recent_tokens.as_slices().0,
+                        params.repeat_penalty,
+                    );
+                    apply_repeat_penalty(
+                        &mut adjusted_logits,
+                        recent_tokens.as_slices().1,
+                        params.repeat_penalty,
+                    );
+                }
+                let token = sample_token(&adjusted_logits, params.temperature, params.top_p)?;
 
                 if let Ok(stop_hit) =
                     Self::is_stop_token(vocab, token, &params.stop_sequences, &llama_vocab_get_text)
@@ -561,6 +652,13 @@ impl LlamaWrapper {
                     ));
                 }
                 position += 1;
+                *token_counts.entry(token).or_insert(0) += 1;
+                if repeat_last_n > 0 {
+                    recent_tokens.push_back(token);
+                    if recent_tokens.len() > repeat_last_n {
+                        recent_tokens.pop_front();
+                    }
+                }
 
                 let piece_ptr = llama_vocab_get_text(vocab, token);
                 if piece_ptr.is_null() {
@@ -746,6 +844,22 @@ impl LlamaWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_apply_penalties() {
+        let mut logits = vec![0.0, 1.0, 2.0, 3.0];
+        let mut counts = HashMap::new();
+        counts.insert(1, 2);
+        counts.insert(3, 1);
+
+        apply_penalties(&mut logits, &counts, 0.5, 0.25);
+
+        assert!((logits[0] - 0.0).abs() < f32::EPSILON);
+        assert!((logits[1] - (1.0 - 0.5 - 0.5)).abs() < 1e-6);
+        assert!((logits[2] - 2.0).abs() < f32::EPSILON);
+        assert!((logits[3] - (3.0 - 0.5 - 0.25)).abs() < 1e-6);
+    }
 
     #[test]
     fn test_new_wrapper_failure() {

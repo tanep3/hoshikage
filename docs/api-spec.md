@@ -43,7 +43,9 @@
   "max_tokens": 256,
   "stream": false,
   "presence_penalty": 0.0,
-  "frequency_penalty": 0.0
+  "frequency_penalty": 0.0,
+  "repeat_penalty": 1.1,
+  "repeat_last_n": 64
 }
 ```
 
@@ -59,6 +61,8 @@
 | stream | boolean | いいえ | ストリーミング応答を有効化 | false |
 | presence_penalty | number | いいえ | 新しいトピックへのペナルティ | 0.0 |
 | frequency_penalty | number | いいえ | 繰り返しへのペナルティ | 0.0 |
+| repeat_penalty | number | いいえ | 反復抑制の倍率（1.0で無効） | 1.1 |
+| repeat_last_n | number | いいえ | 反復抑制の対象トークン数 | 64 |
 
 **レスポンスボディ（非ストリーミング）:**
 
@@ -103,6 +107,8 @@ data: [DONE]
 **補足:**
 - `max_tokens` は非ストリーミングで最大 1024、ストリーミングで最大 2096 に制限されます。
 - `temperature` / `top_p` が省略された場合はサーバー設定のデフォルト値が使用されます。
+- `repeat_penalty` / `repeat_last_n` は星影の拡張パラメータです（OpenAI公式仕様には存在しません）。
+- `repeat_penalty=1.0` または `repeat_last_n=0` の場合は反復抑制が無効になります。
 
 **ステータスコード:**
 

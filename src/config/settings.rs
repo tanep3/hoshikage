@@ -14,6 +14,8 @@ pub struct Config {
     pub n_ctx: u32,
     pub default_temperature: f32,
     pub default_top_p: f32,
+    pub repeat_penalty: f32,
+    pub repeat_last_n: u32,
     pub model_dir: Option<PathBuf>,
     pub model_map_file: Option<PathBuf>,
     pub lib_path: Option<String>,
@@ -33,6 +35,8 @@ impl Default for Config {
             n_ctx: 4096,
             default_temperature: 0.2,
             default_top_p: 0.8,
+            repeat_penalty: 1.1,
+            repeat_last_n: 64,
             model_dir: None,
             model_map_file: None,
             lib_path: None,
@@ -105,6 +109,14 @@ impl Config {
 
         if let Ok(top_p) = std::env::var("TOP_P") {
             config.default_top_p = top_p.parse().unwrap_or(0.8);
+        }
+
+        if let Ok(repeat_penalty) = std::env::var("REPEAT_PENALTY") {
+            config.repeat_penalty = repeat_penalty.parse().unwrap_or(1.1);
+        }
+
+        if let Ok(repeat_last_n) = std::env::var("REPEAT_LAST_N") {
+            config.repeat_last_n = repeat_last_n.parse().unwrap_or(64);
         }
 
         if let Ok(model_dir) = std::env::var("MODEL_DIR") {
