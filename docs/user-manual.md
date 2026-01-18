@@ -25,12 +25,30 @@
 
 ### 1.3 依存関係のインストール
 
+**Linuxの場合:**
 ```bash
-# Cargo経由でローカルインストール
+# 1. 実行パスの設定（.bashrc推奨）
+echo 'export LD_LIBRARY_PATH=$HOME/.config/hoshikage/lib:$LD_LIBRARY_PATH' >> ~/.bashrc
+source ~/.bashrc
+
+# 2. Cargo経由でローカルインストール
 cargo install --path .
 ```
 
-これにより、星影バイナリと必要なライブラリがシステムにインストールされます。
+**Windowsの場合 (PowerShell):**
+```powershell
+# 1. ライブラリ配置用ディレクトリ作成
+mkdir -p "$env:APPDATA\hoshikage\lib"
+
+# 2. 環境変数(PATH)設定 (永続的)
+[System.Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:APPDATA\hoshikage\lib", [System.EnvironmentVariableTarget]::User)
+
+# 3. Cargo経由でローカルインストール
+cargo install --path .
+```
+
+これにより、`hoshikage` コマンドがターミナルから直接利用可能になります。
+※ 別途 `libllama.so` (Linux) または `llama.dll` (Windows) を上記設定パスに配置する必要があります（詳細は `docs/LIBRARY_GUIDE.md` 参照）。
 
 ---
 
@@ -69,25 +87,81 @@ cat > ~/.config/hoshikage/model_map.json << 'EOF'
 EOF
 ```
 
-### 2.2 モデルの切り替え
+### 2.2 モデルの管理 (CLI)
 
-リクエストの`model`パラメータで動的に切り替えます。
+`hoshikage` コマンドでモデルを簡単に管理できます。サーバー起動中でも、停止中でも、いつでも実行可能です。
+
+#### モデルの追加
+```bash
+# 基本 (パスとラベルのみ)
+hoshikage add /path/to/LFM.gguf LFM-v2
+
+# ストップワードを指定する場合
+hoshikage add /path/to/LFM.gguf LFM-v2 "</s>" "<|im_end|>"
+```
+
+#### モデルの削除
+```bash
+hoshikage rm LFM-v2
+```
+
+#### モデルの一覧表示
+```bash
+hoshikage list
+```
+
+### 2.3 モデルの切り替え
+リクエストの`model`パラメータで登録したモデルラベル（例: `LFM-v2`）を指定することで、動的に使用するモデルを切り替えられます。
 
 ---
 
-## 3. サーバー起動
+## 3. 設定
+(高度な設定)
 
-### 3.1 環境変数の設定
+### 3.1 環境変数の設定 (.env)
+サーバーの動作を環境変数ファイル (`.env`) でカスタマイズできます。
+`~/.config/hoshikage/.env` に配置すると自動的に読み込まれます。
 
+**設定ファイルの例 (.env.example):**
 ```bash
-# CUDAライブラリのパスを設定（システムCUDAライブラリを使用する場合）
-export LD_LIBRARY_PATH=/usr/local/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
+# サーバーポート
+PORT=3030
 
-# （オプション）カスタムCUDAライブラリを使用する場合
-# export LD_LIBRARY_PATH=~/.config/hoshikage/lib:$LD_LIBRARY_PATH
+# 非アクティブ時の自動アンロードまでの時間 (秒)
+# 0 にすると自動アンロード無効（デフォルト: 300）
+IDLE_TIMEOUT=300
+
+# RAMディスク設定 (高速ロード用)
+# Linuxの場合: /dev/shm (デフォルト) を使用するため設定不要です。sudo権限も不要です。
+# Windowsの場合: 任意のRAMドライブパス (例: R:/temp) を指定してください。
+# 設定しない場合、自動的にSSDからの直接ロードになります。
+RAMDISK_PATH=/dev/shm
+
+# RAMディスクサイズ (GB) - Windows等で動的確保する場合の目安
+# Linux(/dev/shm)使用時はOSが自動管理するため無視されます
+RAMDISK_SIZE=12
+
+# 長時間非アクティブ時のRAMディスク解放 (分)
+# メモリを完全にOSに返すまでの時間（デフォルト: 60分）
+GREAT_TIMEOUT=60
+
 ```
 
-### 3.2 起動コマンド
+詳細なパラメータは、プロジェクトに含まれる `.env.example` を参照してください。
+
+---
+
+## 4. サーバー起動
+
+### 3.1 準備
+ライブラリが正しく設定されていれば、特別な環境変数は不要です。
+もし一時的にパスを通したい場合は以下のようにします。
+
+```bash
+export LD_LIBRARY_PATH=~/.config/hoshikage/lib:$LD_LIBRARY_PATH
+```
+
+### 4.2 起動コマンド
 
 ```bash
 # 標準起動
@@ -97,130 +171,56 @@ hoshikage
 hoshikage --port 3030
 ```
 
-### 3.3 デーモンとして実行
+### 4.3 デーモンとして実行 (ユーザーモード)
+
+`systemd` のユーザーユニット機能を使って、管理者権限なしで常駐させることができます。
 
 ```bash
-# systemdサービスを作成
-sudo nano /etc/systemd/system/hoshikage.service
+# 1. ユニットファイル配置用ディレクトリ作成
+mkdir -p ~/.config/systemd/user
+
+# 2. ユニットファイル作成
+nano ~/.config/systemd/user/hoshikage.service
 ```
 
-```
+**hoshikage.service の内容:**
+```ini
 [Unit]
-Description=星影 - 高速ローカル推論サーバー
+Description=星影 (Hoshikage) - AI Inference Server
 After=network.target
 
 [Service]
 Type=simple
-User=hoshikage
-Environment=LD_LIBRARY_PATH=/usr/local/cuda/targets/x86_64-linux/lib
-WorkingDirectory=/home/tane/dev/AI/hoshikage
-ExecStart=/home/tane/dev/AI/hoshikage/hoshikage
+# 環境変数を指定（絶対パスで記述）
+Environment=LD_LIBRARY_PATH=%h/.config/hoshikage/lib
+WorkingDirectory=%h/dev/AI/hoshikage
+ExecStart=%h/dev/AI/hoshikage/target/release/hoshikage
 Restart=on-failure
 RestartSec=10
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 ```
+※ `%h` はホームディレクトリ（`/home/ユーザー名`）に自動置換されます。
 
 ```bash
-# サービスを有効化・起動
-sudo systemctl daemon-reload
-sudo systemctl enable hoshikage
-sudo systemctl start hoshikage
+# 3. サービスの有効化と起動
+systemctl --user daemon-reload
+systemctl --user enable hoshikage
+systemctl --user start hoshikage
 
-# サービスの状態確認
-sudo systemctl status hoshikage
+# 4. ステータス確認
+systemctl --user status hoshikage
+
+# (任意) ログアウト後も実行し続ける場合
+loginctl enable-linger $USER
 ```
 
-**例:**
-```bash
-mkdir -p /opt/hoshikage/models
-cp /path/to/LFM2.5-1.2B-JP-Q8_0.gguf /opt/hoshikage/models/
-```
+## 5. APIの使用
 
-```json
-{
-  "LFM2.5_Q8": {
-    "path": "/opt/hoshikage/models",
-    "model": "LFM2.5-1.2B-JP-Q8_0.gguf",
-    "stop": ["<|im_end|>", "</s>"]
-  }
-}
-```
+### 5.1 curlでテスト
 
-### 2.2 モデルの切り替え
-
-リクエストの`model`パラメータで動的に切り替えます。
-
----
-
-## 3. サーバー起動
-
-### 3.1 環境変数の設定
-
-```bash
-# CUDAライブラリのパスを設定
-export LD_LIBRARY_PATH=/usr/local/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
-
-# （オプション）モデルの配置場所を設定
-export MODEL_MAP_FILE=/opt/hoshikage/model_map.json
-```
-
-### 3.2 起動コマンド
-
-```bash
-# デバッグモードで起動
-./target/debug/hoshikage
-
-# リリースモードで起動
-./target/release/hoshikage
-
-# カスタムポートで起動
-./target/release/hoshikage --port 3030
-```
-
-### 3.3 デーモンとして実行
-
-```bash
-# systemdサービスを作成
-sudo nano /etc/systemd/system/hoshikage.service
-```
-
-```
-[Unit]
-Description=星影 - 高速ローカル推論サーバー
-After=network.target
-
-[Service]
-Type=simple
-User=hoshikage
-Environment=LD_LIBRARY_PATH=/usr/local/cuda/targets/x86_64-linux/lib
-WorkingDirectory=/opt/hoshikage
-ExecStart=/opt/hoshikage/hoshikage
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-# サービスを有効化・起動
-sudo systemctl daemon-reload
-sudo systemctl enable hoshikage
-sudo systemctl start hoshikage
-
-# サービスの状態確認
-sudo systemctl status hoshikage
-```
-
----
-
-## 4. APIの使用
-
-### 4.1 curlでテスト
-
-#### 4.1.1 チャット補完（非ストリーミング）
+#### 5.1.1 チャット補完（非ストリーミング）
 
 ```bash
 curl -X POST http://localhost:3030/v1/chat/completions \
@@ -236,7 +236,7 @@ curl -X POST http://localhost:3030/v1/chat/completions \
   }'
 ```
 
-#### 4.1.2 チャット補完（ストリーミング）
+#### 5.1.2 チャット補完（ストリーミング）
 
 ```bash
 curl -X POST http://localhost:3030/v1/chat/completions \
@@ -250,9 +250,9 @@ curl -X POST http://localhost:3030/v1/chat/completions \
   }'
 ```
 
-### 4.2 Pythonで使用
+### 5.2 Pythonで使用
 
-#### 4.2.1 OpenAI SDK
+#### 5.2.1 OpenAI SDK
 
 ```python
 from openai import OpenAI
@@ -290,7 +290,7 @@ for chunk in stream:
 
 ---
 
-## 5. モデル一覧の確認
+## 6. モデル一覧の確認
 
 ```bash
 curl http://localhost:3030/v1/models
@@ -313,9 +313,9 @@ curl http://localhost:3030/v1/models
 
 ---
 
-## 6. ライブラリのトラブルシューティング
+## 7. ライブラリのトラブルシューティング
 
-### 6.1 CUDAライブラリが見つからない
+### 7.1 CUDAライブラリが見つからない
 
 **エラー:** `libllama.so: cannot open shared object file`
 
@@ -339,30 +339,14 @@ ls /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so
 ls /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so
 
 # カスタムライブラリの存在を確認
-ls ~/.config/hoshikage/lib/libcuda.so 2>/dev/null || echo "カスタムライブラリはありません"
+ls ~/.config/hoshikage/lib/libllama.so 2>/dev/null || echo "カスタムライブラリはありません"
 ```
 
----
+**Windowsの場合:**
+`%APPDATA%\hoshikage\lib` に `llama.dll` があるか確認してください。
 
-**作成日:** 2026-01-18
 
-### 6.2 CUDAライブラリが見つからない
-
-**エラー:** `libllama.so: cannot open shared object file`
-
-**解決策:**
-```bash
-# CUDAライブラリのパスを確認
-echo $LD_LIBRARY_PATH
-
-# パスを設定
-export LD_LIBRARY_PATH=/usr/local/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
-
-# ライブラリの存在を確認
-ls /usr/local/cuda/targets/x86_64-linux/lib/libcuda.so
-```
-
-### 6.3 ポートが競合している
+### 7.2 ポートが競合している
 
 **エラー:** `address already in use`
 
@@ -374,8 +358,3 @@ sudo netstat -tulpn | grep :3030
 # 別のポートで起動
 ./target/release/hoshikage --port 3031
 ```
-
----
-
-**作成日:** 2026-01-18
-**バージョン:** 1.0.0

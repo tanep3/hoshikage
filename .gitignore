@@ -60,7 +60,9 @@ target/
 .DS_Store
 Thumbs.db
 
-# プロジェクト固有の設定ファイル
+# AI エージェント関連
+AGENTS.md
+legacy_python/
 
 # 設定ファイルはユーザー固有のためGit管理から除外
 # 実際の設定は ~/.config/hoshikage/ に保存されます

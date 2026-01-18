@@ -6,12 +6,18 @@ description = "星影 - 高速ローカル推論サーバー (CUDA + Flash Atten
 authors = ["Tane Channel Technology"]
 
 [dependencies]
+# コマンドライン引数解析 (CLI用)
+clap = { version = "4.5", features = ["derive", "env"] }
+
 # Webサーバー
 axum = { version = "0.7", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 hyper = { version = "1", features = ["full"] }
+
+# HTTPクライアント (CLI -> Server通信用)
+reqwest = { version = "0.11", features = ["json"] }
 
 # シリアライズ
 serde = { version = "1", features = ["derive"] }
@@ -23,34 +29,31 @@ dotenvy = "0.15"
 # ログ
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2" # ファイル出力・ローテーション用
 
-# UUID
+# ファイルロック
+fs2 = "0.4"
+
+
+# ユーティリティ
 uuid = { version = "1", features = ["v4", "serde"] }
-
-# 日時
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+dirs = "5"
 
 # エラーハンドリング
 anyhow = "1"
 thiserror = "1"
 
-# 非同期チャネル
-async-trait = "0.1"
-
-# 設定管理
-dirs = "5"
-
-# LLM推論
-llama_cpp_rs = { version = "0.3.0", optional = true }
+# FFI / 動的ライブラリロード
+libc = "0.2"
+libloading = "0.8"
 
 [build-dependencies]
-bindgen = "0.70"
+bindgen = "0.69" # バージョンを安定版に指定
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-
-[build]
-rustflags = ["-C", "link-arg=-fuse-ld=lld"]

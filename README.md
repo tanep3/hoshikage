@@ -46,29 +46,40 @@
 
 ---
 
-## 🚀 インストール
+## 🚀 セットアップ
 
-### 依存関係のインストール
+### 1. ライブラリの準備 (重要)
+星影は `llama.cpp` の動的ライブラリ (`libllama.so` / `llama.dll`) を使用します。
+ご利用の環境に合わせてライブラリを配置する必要があります。
+
+詳細な手順は **[ライブラリ運用ガイド](docs/LIBRARY_GUIDE.md)** を参照してください。
+
+### 2. インストール
+Cargoを使ってインストールします。
 
 ```bash
-# Cargo経由でローカルインストール
 cargo install --path .
 ```
 
-これにより、星影バイナリと必要なライブラリがシステムにインストールされます。
-
 ---
 
-## 🚀 実行
+## 📖 使い方
 
-### 環境変数の設定
-
+### サーバーの起動
 ```bash
-# システムCUDAライブラリのパスを設定
-export LD_LIBRARY_PATH=/usr/local/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
+# 標準ポート(3030)で起動
+hoshikage
+
+# ポート指定で起動
+hoshikage --port 8080
 ```
 
+モデルのダウンロード配置、APIの呼び出し方、Systemdによるデーモン化などの詳細は、
+**[ユーザーマニュアル](docs/user-manual.md)** をご覧ください。
+
 ---
+
+
 
 ## 🏗️ アーキテクチャ
 
@@ -111,23 +122,32 @@ export LD_LIBRARY_PATH=/usr/local/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
 ---
 
 ## 📝 ドキュメント
+(開発者向け)
 
 | ドキュメント | 説明 |
 |-------------|------|
-| [requirements.md](docs/requirements.md) | システム寄りの要件定義書 |
+| [requirements.md](docs/requirements.md) | 要件定義書 |
 | [api-spec.md](docs/api-spec.md) | API仕様書 |
 | [system-design.md](docs/system-design.md) | システム設計書 |
-| [user-manual.md](docs/user-manual.md) | ユーザーマニュアル |
-| [LIBRARY_FILES.md](docs/LIBRARY_FILES.md) | ライブラリファイルの配置について |
-| [LIBRARY_PLACEMENT.md](docs/LIBRARY_PLACEMENT.md) | ライブラリ配置オプション |
+| [nfr-details.md](docs/nfr-details.md) | 非機能要件詳細 |
 
 ---
 
 ## 🙏 謝辞
 
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) - 高速推論エンジン
+  - このソフトウェアは llama.cpp (Copyright (c) 2023 Georgi Gerganov) を含んでいます。
+  - ライセンス: [MIT License](https://github.com/ggerganov/llama.cpp/blob/master/LICENSE)
 - [Axum](https://github.com/tokio-rs/axum) - 高速Webフレームワーク
 - [Rust](https://www.rust-lang.org/) - システムプログラミング言語
+
+---
+
+## 📜 ライセンス
+
+MIT License
+
+Copyright (c) 2026 Tane Channel Technology
 
 ---
 
