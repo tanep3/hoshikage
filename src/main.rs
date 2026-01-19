@@ -100,6 +100,9 @@ async fn main() -> hoshikage::Result<()> {
 
     manager.load_models().await?;
 
+    // タイムアウト監視タスクを開始 (IDLE_TIMEOUT: VRAMオフロード, GREAT_TIMEOUT: RAMディスク解放)
+    manager.clone().start_idle_monitor();
+
     let app = api::create_router(manager);
 
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", config.host, cli.port)).await?;
