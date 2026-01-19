@@ -1,5 +1,9 @@
 # 星影 (Hoshikage) - 高速ローカル推論サーバー
 
+[![CI](https://github.com/tanep3/hoshikage/actions/workflows/ci.yml/badge.svg)](https://github.com/tanep3/hoshikage/actions/workflows/ci.yml)
+[![Release](https://github.com/tanep3/hoshikage/actions/workflows/release.yml/badge.svg)](https://github.com/tanep3/hoshikage/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 ## 概要
 
 **星影（ほしかげ）** は、GGUFフォーマットの大規模言語モデルをローカル環境で高速かつ効率的に実行し、OpenAI互換のAPIを提供するRustアプリケーションです。プライバシーを重視し、外部へのデータ送信を最小限に抑えつつ、高品質な対話型AI体験を提供します。
@@ -130,6 +134,7 @@ hoshikage --port 8080
 | [api-spec.md](docs/api-spec.md) | API仕様書 |
 | [system-design.md](docs/system-design.md) | システム設計書 |
 | [nfr-details.md](docs/nfr-details.md) | 非機能要件詳細 |
+| [ci-cd-pipeline.md](docs/ci-cd-pipeline.md) | CI/CD パイプライン |
 
 ---
 

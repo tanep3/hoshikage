@@ -1,3 +1,5 @@
+use crate::error::Result;
+use async_stream::stream;
 use axum::{
     extract::State,
     http::StatusCode,
@@ -5,10 +7,8 @@ use axum::{
     response::{IntoResponse, Response, Sse},
     Json,
 };
-use async_stream::stream;
-use std::convert::Infallible;
-use crate::error::Result;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -110,12 +110,12 @@ pub async fn chat_completion(
     let model_name = req.model.clone();
 
     if req.messages.is_empty() {
-            return error_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "validation_error",
-                "messages must not be empty",
-                "invalid_request",
-            );
+        return error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "validation_error",
+            "messages must not be empty",
+            "invalid_request",
+        );
     }
 
     let model_config = match manager.get_model(&model_name).await {
@@ -165,9 +165,7 @@ pub async fn chat_completion(
     }
 
     let params = crate::inference::llama_wrapper::InferenceParams {
-        temperature: req
-            .temperature
-            .unwrap_or(manager.default_temperature()),
+        temperature: req.temperature.unwrap_or(manager.default_temperature()),
         top_p: req.top_p.unwrap_or(manager.default_top_p()),
         max_tokens,
         stop_sequences,
@@ -176,9 +174,7 @@ pub async fn chat_completion(
         repeat_penalty: req
             .repeat_penalty
             .unwrap_or(manager.default_repeat_penalty()),
-        repeat_last_n: req
-            .repeat_last_n
-            .unwrap_or(manager.default_repeat_last_n()) as usize,
+        repeat_last_n: req.repeat_last_n.unwrap_or(manager.default_repeat_last_n()) as usize,
     };
 
     if stream_response {
@@ -224,14 +220,17 @@ fn error_response(
     message: impl Into<String>,
     error_type: &str,
 ) -> Response {
-    (status, Json(ErrorResponse {
-        error: ErrorBody {
-            code: code.to_string(),
-            message: message.into(),
-            error_type: error_type.to_string(),
-            param: None,
-        },
-    }))
+    (
+        status,
+        Json(ErrorResponse {
+            error: ErrorBody {
+                code: code.to_string(),
+                message: message.into(),
+                error_type: error_type.to_string(),
+                param: None,
+            },
+        }),
+    )
         .into_response()
 }
 
@@ -336,7 +335,7 @@ mod tests {
 
     #[test]
     fn test_format_prompt() {
-        let messages = vec![
+        let messages = [
             ChatMessage {
                 role: "user".to_string(),
                 content: "Hello".to_string(),

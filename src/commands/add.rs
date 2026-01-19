@@ -95,10 +95,10 @@ fn add_directly(name: String, config: ModelConfig) -> Result<()> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(true)
         .open(&model_map_path)?;
 
-    let _lock = file
-        .try_lock_exclusive()
+    file.try_lock_exclusive()
         .map_err(|e| crate::error::HoshikageError::Other(format!("Failed to lock file: {}", e)))?;
 
     models.insert(name.clone(), config);

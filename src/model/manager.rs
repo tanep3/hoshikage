@@ -61,19 +61,17 @@ impl ModelManager {
                 models_guard.len(),
                 model_map_path.display()
             );
+        } else if let Some(models) = self.scan_model_dir()? {
+            let mut models_guard = self.models.write().await;
+            *models_guard = models;
+            drop(models_guard);
+            self.save_models().await?;
+            tracing::info!(
+                "Model map file not found. Scanned model directory and saved to {}",
+                model_map_path.display()
+            );
         } else {
-            if let Some(models) = self.scan_model_dir()? {
-                let mut models_guard = self.models.write().await;
-                *models_guard = models;
-                drop(models_guard);
-                self.save_models().await?;
-                tracing::info!(
-                    "Model map file not found. Scanned model directory and saved to {}",
-                    model_map_path.display()
-                );
-            } else {
-                tracing::warn!("Model map file not found: {}", model_map_path.display());
-            }
+            tracing::warn!("Model map file not found: {}", model_map_path.display());
         }
 
         Ok(())
@@ -185,7 +183,11 @@ impl ModelManager {
                 if great_timeout > 0 && idle_secs >= great_timeout * 60 {
                     if let Some(path) = state.ramdisk_file.take() {
                         if let Err(e) = std::fs::remove_file(&path) {
-                            tracing::warn!("Failed to remove ramdisk file {}: {}", path.display(), e);
+                            tracing::warn!(
+                                "Failed to remove ramdisk file {}: {}",
+                                path.display(),
+                                e
+                            );
                         } else {
                             tracing::info!("Removed ramdisk file {}", path.display());
                         }
@@ -201,12 +203,10 @@ impl ModelManager {
         prompt: &str,
         params: InferenceParams,
     ) -> Result<(String, u32, u32)> {
-        let _permit = self
-            .semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| crate::error::HoshikageError::Other(format!("Semaphore error: {}", e)))?;
+        let _permit =
+            self.semaphore.clone().acquire_owned().await.map_err(|e| {
+                crate::error::HoshikageError::Other(format!("Semaphore error: {}", e))
+            })?;
 
         let model_config = self.get_model(model_name).await?;
         let mut state = self
@@ -267,12 +267,10 @@ impl ModelManager {
         params: InferenceParams,
         sender: tokio::sync::mpsc::UnboundedSender<Result<String>>,
     ) -> Result<()> {
-        let _permit = self
-            .semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| crate::error::HoshikageError::Other(format!("Semaphore error: {}", e)))?;
+        let _permit =
+            self.semaphore.clone().acquire_owned().await.map_err(|e| {
+                crate::error::HoshikageError::Other(format!("Semaphore error: {}", e))
+            })?;
 
         let model_config = self.get_model(&model_name).await?;
         let mut state = self
@@ -316,7 +314,11 @@ impl ModelManager {
     ) -> Result<()> {
         let needs_reload = state.wrapper.is_none()
             || state.current_model.as_deref() != Some(model_name)
-            || !state.wrapper.as_ref().map(|w| w.is_loaded()).unwrap_or(false);
+            || !state
+                .wrapper
+                .as_ref()
+                .map(|w| w.is_loaded())
+                .unwrap_or(false);
 
         if !needs_reload {
             return Ok(());

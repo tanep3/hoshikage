@@ -54,7 +54,10 @@ pub type LlamaBackendFree = unsafe extern "C" fn();
 pub type LlamaNumaInit = unsafe extern "C" fn(numa: ggml_numa_strategy);
 pub type LlamaModelGetVocab = unsafe extern "C" fn(model: *const llama_model) -> *const llama_vocab;
 pub type LlamaVocabNumTokens = unsafe extern "C" fn(vocab: *const llama_vocab) -> i32;
-pub type LlamaVocabGetText = unsafe extern "C" fn(vocab: *const llama_vocab, token: llama_token) -> *const ::std::os::raw::c_char;
+pub type LlamaVocabGetText = unsafe extern "C" fn(
+    vocab: *const llama_vocab,
+    token: llama_token,
+) -> *const ::std::os::raw::c_char;
 pub type LlamaTokenToPiece = unsafe extern "C" fn(
     vocab: *const llama_vocab,
     token: llama_token,
@@ -126,10 +129,7 @@ fn sample_token(logits: &[f32], temperature: f32, top_p: f32) -> Result<i32> {
     }
 
     let temp = temperature.max(1e-5);
-    let max_logit = logits
-        .iter()
-        .cloned()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
     let mut probs: Vec<(usize, f32)> = logits
         .iter()
@@ -140,7 +140,7 @@ fn sample_token(logits: &[f32], temperature: f32, top_p: f32) -> Result<i32> {
     probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let total: f32 = probs.iter().map(|(_, p)| p).sum();
-    let threshold = total * top_p.max(0.0).min(1.0);
+    let threshold = total * top_p.clamp(0.0, 1.0);
     let mut cumulative = 0.0f32;
     let mut candidates = Vec::new();
     for (idx, prob) in probs {
@@ -229,20 +229,16 @@ impl LlamaWrapper {
             .map_err(|e| crate::error::HoshikageError::LibraryLoadError(e.to_string()))?;
 
         static BACKEND_INIT: Once = Once::new();
-        BACKEND_INIT.call_once(|| {
-            unsafe {
-                if let Ok(llama_backend_init) =
-                    loader.get_symbol::<LlamaBackendInit>("llama_backend_init")
-                {
-                    llama_backend_init();
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    if let Ok(llama_numa_init) =
-                        loader.get_symbol::<LlamaNumaInit>("llama_numa_init")
-                    {
-                        llama_numa_init(0);
-                    }
+        BACKEND_INIT.call_once(|| unsafe {
+            if let Ok(llama_backend_init) =
+                loader.get_symbol::<LlamaBackendInit>("llama_backend_init")
+            {
+                llama_backend_init();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                if let Ok(llama_numa_init) = loader.get_symbol::<LlamaNumaInit>("llama_numa_init") {
+                    llama_numa_init(0);
                 }
             }
         });
@@ -364,7 +360,9 @@ impl LlamaWrapper {
         })?;
 
         unsafe {
-            if let Ok(kv_clear) = self._loader.get_symbol::<LlamaKvCacheClear>("llama_kv_cache_clear")
+            if let Ok(kv_clear) = self
+                ._loader
+                .get_symbol::<LlamaKvCacheClear>("llama_kv_cache_clear")
             {
                 kv_clear(context);
                 return Ok(());
@@ -547,8 +545,8 @@ impl LlamaWrapper {
             let mut recent_tokens: VecDeque<i32> = VecDeque::new();
             let repeat_last_n = params.repeat_last_n.min(8192);
 
-            for i in 0..n_tokens {
-                let mut token = tokens[i];
+            for (i, &token) in tokens.iter().enumerate().take(n_tokens) {
+                let mut token = token;
                 *token_counts.entry(token).or_insert(0) += 1;
                 if repeat_last_n > 0 {
                     recent_tokens.push_back(token);
@@ -589,13 +587,12 @@ impl LlamaWrapper {
 
             let mut generated_tokens = 0;
             let mut pending_bytes: Vec<u8> = Vec::new();
-            for _ in 0..params.max_tokens.min(4096 as i32) {
+            for _ in 0..params.max_tokens.min(4096_i32) {
                 let logits_ptr = llama_get_logits_ith(context, 0);
                 if logits_ptr.is_null() {
                     break;
                 }
-                let logits_slice =
-                    std::slice::from_raw_parts(logits_ptr, vocab_size as usize);
+                let logits_slice = std::slice::from_raw_parts(logits_ptr, vocab_size as usize);
                 let mut adjusted_logits = logits_slice.to_vec();
                 apply_penalties(
                     &mut adjusted_logits,
@@ -828,8 +825,9 @@ impl LlamaWrapper {
         }
 
         unsafe {
-            if let Ok(llama_backend_free) =
-                self._loader.get_symbol::<LlamaBackendFree>("llama_backend_free")
+            if let Ok(llama_backend_free) = self
+                ._loader
+                .get_symbol::<LlamaBackendFree>("llama_backend_free")
             {
                 llama_backend_free();
             }

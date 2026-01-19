@@ -34,6 +34,13 @@ impl DynamicLibraryLoader {
         self.lib.is_some()
     }
 
+    /// # Safety
+    ///
+    /// This function is unsafe because it loads a symbol from a dynamic library.
+    /// The caller must ensure that:
+    /// - The library is loaded before calling this function
+    /// - The symbol name is valid and exists in the library
+    /// - The type T matches the actual symbol type in the library
     pub unsafe fn get_symbol<T>(&self, name: &str) -> Result<Symbol<'_, T>> {
         let lib = self.lib.as_ref().ok_or_else(|| {
             crate::error::HoshikageError::LibraryLoadError("Library not loaded".to_string())

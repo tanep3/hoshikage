@@ -80,9 +80,8 @@ async fn main() -> hoshikage::Result<()> {
             .with_writer(BoxMakeWriter::new(non_blocking))
             .finish();
 
-        tracing::subscriber::set_global_default(subscriber).map_err(|e| {
-            HoshikageError::Other(format!("Failed to set logger: {}", e))
-        })?;
+        tracing::subscriber::set_global_default(subscriber)
+            .map_err(|e| HoshikageError::Other(format!("Failed to set logger: {}", e)))?;
 
         tracing::info!("Logging to file: {}", log_file_path);
     } else {
@@ -91,9 +90,8 @@ async fn main() -> hoshikage::Result<()> {
             .with_writer(BoxMakeWriter::new(std::io::stdout))
             .finish();
 
-        tracing::subscriber::set_global_default(subscriber).map_err(|e| {
-            HoshikageError::Other(format!("Failed to set logger: {}", e))
-        })?;
+        tracing::subscriber::set_global_default(subscriber)
+            .map_err(|e| HoshikageError::Other(format!("Failed to set logger: {}", e)))?;
     }
 
     let manager = Arc::new(ModelManager::new(config.clone()));

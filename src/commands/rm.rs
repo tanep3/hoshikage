@@ -73,10 +73,10 @@ fn remove_directly(name: String) -> Result<()> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(true)
         .open(&model_map_path)?;
 
-    let _lock = file
-        .try_lock_exclusive()
+    file.try_lock_exclusive()
         .map_err(|e| crate::error::HoshikageError::Other(format!("Failed to lock file: {}", e)))?;
 
     let content = std::fs::read_to_string(&model_map_path)?;
