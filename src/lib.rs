@@ -5,7 +5,13 @@ pub mod model;
 
 pub mod commands;
 
-#[allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code)]
+#[allow(
+    non_upper_case_globals,
+    non_camel_case_types,
+    non_snake_case,
+    dead_code,
+    clippy::upper_case_acronyms
+)]
 mod ffi;
 
 pub mod error;

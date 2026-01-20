@@ -228,19 +228,16 @@ impl ModelManager {
         })?;
 
         let prompt_tokens = wrapper.count_tokens(prompt)? as u32;
-        let output;
 
         if wrapper.is_diffusion_model()? {
             tracing::info!("Using diffusion generation for model: {}", model_name);
             let (diff_output, _, diff_completion) =
                 wrapper.generate_with_diffusion(prompt, &params, &self.config)?;
-            output = diff_output;
             state.last_access = Instant::now();
-            return Ok((output, prompt_tokens, diff_completion));
-        } else {
-            output = wrapper.generate(prompt, &params)?;
+            return Ok((diff_output, prompt_tokens, diff_completion));
         }
 
+        let output = wrapper.generate(prompt, &params)?;
         let completion_tokens = wrapper.count_tokens(&output)? as u32;
         state.last_access = Instant::now();
 

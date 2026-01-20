@@ -89,19 +89,18 @@ pub type LlamaChatApplyTemplate = unsafe extern "C" fn(
     buf: *mut ::std::os::raw::c_char,
     length: i32,
 ) -> i32;
-pub type LlamaBatchInit = unsafe extern "C" fn(n_tokens: i32, embd: i32, n_seq_max: i32)
-    -> llama_batch;
+pub type LlamaBatchInit =
+    unsafe extern "C" fn(n_tokens: i32, embd: i32, n_seq_max: i32) -> llama_batch;
 pub type LlamaBatchFree = unsafe extern "C" fn(batch: llama_batch);
 pub type LlamaVocabMask = unsafe extern "C" fn(vocab: *const llama_vocab) -> llama_token;
 pub type LlamaSetCausalAttn = unsafe extern "C" fn(ctx: *mut llama_context, causal_attn: bool);
 pub type LlamaSamplerChainDefaultParams = unsafe extern "C" fn() -> llama_sampler_chain_params;
-pub type LlamaSamplerChainInit = unsafe extern "C" fn(params: llama_sampler_chain_params)
-    -> *mut llama_sampler;
+pub type LlamaSamplerChainInit =
+    unsafe extern "C" fn(params: llama_sampler_chain_params) -> *mut llama_sampler;
 pub type LlamaSamplerChainAdd =
     unsafe extern "C" fn(chain: *mut llama_sampler, smpl: *mut llama_sampler);
 pub type LlamaSamplerInitTopK = unsafe extern "C" fn(k: i32) -> *mut llama_sampler;
-pub type LlamaSamplerInitTopP =
-    unsafe extern "C" fn(p: f32, min_keep: usize) -> *mut llama_sampler;
+pub type LlamaSamplerInitTopP = unsafe extern "C" fn(p: f32, min_keep: usize) -> *mut llama_sampler;
 pub type LlamaSamplerInitTemp = unsafe extern "C" fn(t: f32) -> *mut llama_sampler;
 pub type LlamaSamplerInitDist = unsafe extern "C" fn(seed: u32) -> *mut llama_sampler;
 pub type LlamaSamplerApply =
@@ -658,9 +657,7 @@ impl LlamaWrapper {
         );
 
         let diff_params = DiffusionParams {
-            steps: params
-                .diffusion_steps
-                .unwrap_or(config.diffusion_steps),
+            steps: params.diffusion_steps.unwrap_or(config.diffusion_steps),
             algorithm: DiffusionAlgorithm::from_i32(
                 params
                     .diffusion_algorithm
@@ -875,6 +872,19 @@ impl LlamaWrapper {
                 }
                 let token = sample_token(&adjusted_logits, params.temperature, params.top_p)?;
 
+                // Stop token check (string-based, compatible with all model types)
+                if let Ok(stop_hit) =
+                    Self::is_stop_token(vocab, token, &params.stop_sequences, &llama_vocab_get_text)
+                {
+                    if stop_hit {
+                        if generated_tokens == 0 {
+                            // Avoid empty output on first stop token.
+                        } else {
+                            return Ok(result);
+                        }
+                    }
+                }
+
                 let mut token = token;
                 let mut pos = position;
                 let mut seq_id: llama_seq_id = 0;
@@ -980,6 +990,25 @@ impl LlamaWrapper {
         }
     }
 
+    fn is_stop_token(
+        vocab: *const llama_vocab,
+        token: llama_token,
+        stop_sequences: &[String],
+        llama_vocab_get_text: &Symbol<LlamaVocabGetText>,
+    ) -> Result<bool> {
+        if stop_sequences.is_empty() {
+            return Ok(false);
+        }
+        let text_ptr = unsafe { llama_vocab_get_text(vocab, token) };
+        if text_ptr.is_null() {
+            return Ok(false);
+        }
+        let text = unsafe { CStr::from_ptr(text_ptr) }
+            .to_string_lossy()
+            .to_string();
+        Ok(stop_sequences.iter().any(|s| s == &text))
+    }
+
     pub fn generate_diffusion(
         &self,
         prompt: &str,
@@ -1083,40 +1112,32 @@ impl LlamaWrapper {
                     ))
                 })?;
 
-            let llama_get_logits: Symbol<LlamaGetLogits> = self
-                ._loader
-                .get_symbol("llama_get_logits")
-                .map_err(|e| {
+            let llama_get_logits: Symbol<LlamaGetLogits> =
+                self._loader.get_symbol("llama_get_logits").map_err(|e| {
                     crate::error::HoshikageError::LibraryLoadError(format!(
                         "Failed to get symbol llama_get_logits: {}",
                         e
                     ))
                 })?;
 
-            let llama_batch_init: Symbol<LlamaBatchInit> = self
-                ._loader
-                .get_symbol("llama_batch_init")
-                .map_err(|e| {
+            let llama_batch_init: Symbol<LlamaBatchInit> =
+                self._loader.get_symbol("llama_batch_init").map_err(|e| {
                     crate::error::HoshikageError::LibraryLoadError(format!(
                         "Failed to get symbol llama_batch_init: {}",
                         e
                     ))
                 })?;
 
-            let llama_batch_free: Symbol<LlamaBatchFree> = self
-                ._loader
-                .get_symbol("llama_batch_free")
-                .map_err(|e| {
+            let llama_batch_free: Symbol<LlamaBatchFree> =
+                self._loader.get_symbol("llama_batch_free").map_err(|e| {
                     crate::error::HoshikageError::LibraryLoadError(format!(
                         "Failed to get symbol llama_batch_free: {}",
                         e
                     ))
                 })?;
 
-            let llama_vocab_mask: Symbol<LlamaVocabMask> = self
-                ._loader
-                .get_symbol("llama_vocab_mask")
-                .map_err(|e| {
+            let llama_vocab_mask: Symbol<LlamaVocabMask> =
+                self._loader.get_symbol("llama_vocab_mask").map_err(|e| {
                     crate::error::HoshikageError::LibraryLoadError(format!(
                         "Failed to get symbol llama_vocab_mask: {}",
                         e
@@ -1223,10 +1244,8 @@ impl LlamaWrapper {
                     ))
                 })?;
 
-            let llama_sampler_free: Symbol<LlamaSamplerFree> = self
-                ._loader
-                .get_symbol("llama_sampler_free")
-                .map_err(|e| {
+            let llama_sampler_free: Symbol<LlamaSamplerFree> =
+                self._loader.get_symbol("llama_sampler_free").map_err(|e| {
                     crate::error::HoshikageError::LibraryLoadError(format!(
                         "Failed to get symbol llama_sampler_free: {}",
                         e
@@ -1438,7 +1457,8 @@ impl LlamaWrapper {
                             block_mask_count += 1;
                         }
                     }
-                    num_transfer_tokens = get_num_transfer_tokens(block_mask_count, steps_per_block);
+                    num_transfer_tokens =
+                        get_num_transfer_tokens(block_mask_count, steps_per_block);
                 }
 
                 for step in 0..steps_per_block {
@@ -1529,9 +1549,10 @@ impl LlamaWrapper {
                             llama_batch_free(batch);
                             llama_sampler_free(sampler_chain);
                             llama_sampler_free(dist_sampler);
-                            return Err(crate::error::HoshikageError::InferenceError(
-                                format!("Failed to decode at step {}", step),
-                            ));
+                            return Err(crate::error::HoshikageError::InferenceError(format!(
+                                "Failed to decode at step {}",
+                                step
+                            )));
                         }
                         let ptr = llama_get_logits(context);
                         if ptr.is_null() {
@@ -1583,8 +1604,7 @@ impl LlamaWrapper {
 
                     if params.algorithm == DiffusionAlgorithm::Origin {
                         let transfer_count = transfer_count.max(0);
-                        let p_transfer =
-                            transfer_count as f32 / mask_positions.len().max(1) as f32;
+                        let p_transfer = transfer_count as f32 / mask_positions.len().max(1) as f32;
                         for pos in &mask_positions {
                             if rng.gen::<f32>() < p_transfer {
                                 let pos_logits = get_logits_for_pos(*pos);
@@ -1601,8 +1621,7 @@ impl LlamaWrapper {
                                 };
                                 llama_sampler_apply(sampler_chain, &mut cur_p);
                                 if cur_p.selected >= 0 {
-                                    output_tokens[*pos] =
-                                        candidates[cur_p.selected as usize].id;
+                                    output_tokens[*pos] = candidates[cur_p.selected as usize].id;
                                 }
                             }
                         }
@@ -1633,8 +1652,7 @@ impl LlamaWrapper {
                             } else {
                                 0
                             };
-                            let conf =
-                                calculate_confidence(&cur_p, params.algorithm, &mut rng);
+                            let conf = calculate_confidence(&cur_p, params.algorithm, &mut rng);
                             sampled_tokens.push(sampled);
                             confidences.push((conf, i));
                         }
@@ -1689,8 +1707,7 @@ impl LlamaWrapper {
             llama_sampler_free(dist_sampler);
 
             let mut result = String::new();
-            for idx in n_prompt_tokens..max_length {
-                let token = output_tokens[idx];
+            for &token in output_tokens.iter().take(max_length).skip(n_prompt_tokens) {
                 if token == mask_token {
                     continue;
                 }
@@ -1705,8 +1722,7 @@ impl LlamaWrapper {
                     false,
                 );
                 if n > 0 {
-                    let bytes =
-                        std::slice::from_raw_parts(buf.as_ptr() as *const u8, n as usize);
+                    let bytes = std::slice::from_raw_parts(buf.as_ptr() as *const u8, n as usize);
                     match std::str::from_utf8(bytes) {
                         Ok(text) => {
                             result.push_str(text);
@@ -1827,17 +1843,21 @@ impl LlamaWrapper {
         })?;
 
         unsafe {
-            let llama_model_is_diffusion: Symbol<LlamaModelIsDiffusion> = self
+            // シンボルがなければ false を返す（後方互換性: 古い libllama.so 対応）
+            let func = match self
                 ._loader
-                .get_symbol("llama_model_is_diffusion")
-                .map_err(|e| {
-                    crate::error::HoshikageError::LibraryLoadError(format!(
-                        "Failed to get symbol llama_model_is_diffusion: {}",
-                        e
-                    ))
-                })?;
+                .get_symbol::<LlamaModelIsDiffusion>("llama_model_is_diffusion")
+            {
+                Ok(f) => f,
+                Err(_) => {
+                    tracing::debug!(
+                        "llama_model_is_diffusion symbol not found, assuming non-diffusion model"
+                    );
+                    return Ok(false);
+                }
+            };
 
-            Ok(llama_model_is_diffusion(model))
+            Ok(func(model))
         }
     }
 }
