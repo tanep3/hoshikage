@@ -640,7 +640,7 @@ impl LlamaWrapper {
         params: &InferenceParams,
         config: &Config,
     ) -> Result<(String, u32, u32)> {
-        let prompt_tokens = self.count_tokens(prompt)? as i32;
+        let prompt_tokens = self.count_tokens(prompt)?;
         let ctx_limit = config.n_ctx as i32;
         let diffusion_limit = if config.diffusion_max_tokens > 0 {
             config.diffusion_max_tokens.min(ctx_limit)
@@ -1318,9 +1318,7 @@ impl LlamaWrapper {
 
             let mut output_tokens = vec![0i32; max_length];
             output_tokens[..n_prompt_tokens].copy_from_slice(&tokens[..n_prompt_tokens]);
-            for i in n_prompt_tokens..max_length {
-                output_tokens[i] = mask_token;
-            }
+            output_tokens[n_prompt_tokens..max_length].fill(mask_token);
 
             llama_set_causal_attn(context, false);
 
@@ -1395,6 +1393,7 @@ impl LlamaWrapper {
                     } else {
                         max_length
                     };
+                    #[allow(clippy::manual_is_multiple_of)]
                     if max_length % block_length != 0 {
                         llama_batch_free(batch);
                         llama_sampler_free(sampler_chain);
@@ -1452,8 +1451,8 @@ impl LlamaWrapper {
 
                 if params.schedule == TransferSchedule::BlockBased {
                     let mut block_mask_count = 0;
-                    for i in block_start..block_end {
-                        if output_tokens[i] == mask_token {
+                    for &token in output_tokens.iter().take(block_end).skip(block_start) {
+                        if token == mask_token {
                             block_mask_count += 1;
                         }
                     }
@@ -1503,12 +1502,8 @@ impl LlamaWrapper {
                         );
 
                         un_x_buffer.copy_from_slice(&output_tokens);
-                        for i in 0..n_prompt_tokens {
-                            un_x_buffer[i] = mask_token;
-                        }
-                        for i in 0..max_length {
-                            tokens_slice[i] = un_x_buffer[i];
-                        }
+                        un_x_buffer[..n_prompt_tokens].fill(mask_token);
+                        tokens_slice[..max_length].copy_from_slice(&un_x_buffer[..max_length]);
                         let ret = if use_encode {
                             llama_encode(context, batch)
                         } else {
@@ -1532,11 +1527,11 @@ impl LlamaWrapper {
                             ));
                         }
 
-                        for i in 0..logits_size {
+                        for (i, val) in cond_logits_buffer.iter_mut().enumerate().take(logits_size)
+                        {
                             let uncond = *uncond_logits_ptr.add(i);
-                            let cond = cond_logits_buffer[i];
-                            cond_logits_buffer[i] =
-                                uncond + (params.cfg_scale + 1.0) * (cond - uncond);
+                            let cond = *val;
+                            *val = uncond + (params.cfg_scale + 1.0) * (cond - uncond);
                         }
                         cond_logits_buffer.as_ptr()
                     } else {
@@ -1579,13 +1574,12 @@ impl LlamaWrapper {
                     };
 
                     mask_positions.clear();
-                    for i in 0..max_length {
-                        if output_tokens[i] == mask_token {
-                            if params.schedule != TransferSchedule::BlockBased
-                                || (i >= block_start && i < block_end)
-                            {
-                                mask_positions.push(i);
-                            }
+                    for (i, &token) in output_tokens.iter().enumerate().take(max_length) {
+                        if token == mask_token
+                            && (params.schedule != TransferSchedule::BlockBased
+                                || (i >= block_start && i < block_end))
+                        {
+                            mask_positions.push(i);
                         }
                     }
 
@@ -1608,10 +1602,12 @@ impl LlamaWrapper {
                         for pos in &mask_positions {
                             if rng.gen::<f32>() < p_transfer {
                                 let pos_logits = get_logits_for_pos(*pos);
-                                for token_id in 0..vocab_size {
-                                    candidates[token_id].id = token_id as i32;
-                                    candidates[token_id].logit = *pos_logits.add(token_id);
-                                    candidates[token_id].p = 0.0;
+                                for (token_id, cand) in
+                                    candidates.iter_mut().enumerate().take(vocab_size)
+                                {
+                                    cand.id = token_id as i32;
+                                    cand.logit = *pos_logits.add(token_id);
+                                    cand.p = 0.0;
                                 }
                                 let mut cur_p = llama_token_data_array {
                                     data: candidates.as_mut_ptr(),
@@ -1633,10 +1629,12 @@ impl LlamaWrapper {
 
                         for (i, pos) in mask_positions.iter().enumerate() {
                             let pos_logits = get_logits_for_pos(*pos);
-                            for token_id in 0..vocab_size {
-                                candidates[token_id].id = token_id as i32;
-                                candidates[token_id].logit = *pos_logits.add(token_id);
-                                candidates[token_id].p = 0.0;
+                            for (token_id, cand) in
+                                candidates.iter_mut().enumerate().take(vocab_size)
+                            {
+                                cand.id = token_id as i32;
+                                cand.logit = *pos_logits.add(token_id);
+                                cand.p = 0.0;
                             }
 
                             let mut cur_p = llama_token_data_array {
