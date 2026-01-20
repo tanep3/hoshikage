@@ -1,6 +1,6 @@
 [package]
 name = "hoshikage"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "星影 - 高速ローカル推論サーバー (CUDA + Flash Attention + KV Cache)"
 authors = ["Tane Channel Technology"]

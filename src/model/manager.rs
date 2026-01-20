@@ -228,7 +228,19 @@ impl ModelManager {
         })?;
 
         let prompt_tokens = wrapper.count_tokens(prompt)? as u32;
-        let output = wrapper.generate(prompt, &params)?;
+        let output;
+
+        if wrapper.is_diffusion_model()? {
+            tracing::info!("Using diffusion generation for model: {}", model_name);
+            let (diff_output, _, diff_completion) =
+                wrapper.generate_with_diffusion(prompt, &params, &self.config)?;
+            output = diff_output;
+            state.last_access = Instant::now();
+            return Ok((output, prompt_tokens, diff_completion));
+        } else {
+            output = wrapper.generate(prompt, &params)?;
+        }
+
         let completion_tokens = wrapper.count_tokens(&output)? as u32;
         state.last_access = Instant::now();
 
@@ -304,6 +316,24 @@ impl ModelManager {
         }
 
         Ok(())
+    }
+
+    pub async fn is_diffusion_model(&self, model_name: &str) -> Result<bool> {
+        let model_config = self.get_model(model_name).await?;
+        let mut state = self
+            .inference
+            .lock()
+            .map_err(|e| crate::error::HoshikageError::Other(format!("Lock error: {}", e)))?;
+
+        self.load_model_if_needed(&mut state, model_name, &model_config)?;
+
+        let wrapper = state.wrapper.as_ref().ok_or_else(|| {
+            crate::error::HoshikageError::InferenceError("Model not loaded".to_string())
+        })?;
+        let is_diffusion = wrapper.is_diffusion_model()?;
+
+        state.last_access = Instant::now();
+        Ok(is_diffusion)
     }
 
     fn load_model_if_needed(

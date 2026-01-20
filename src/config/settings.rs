@@ -19,6 +19,12 @@ pub struct Config {
     pub model_dir: Option<PathBuf>,
     pub model_map_file: Option<PathBuf>,
     pub lib_path: Option<String>,
+    // Diffusion parameters
+    pub diffusion_steps: i32,
+    pub diffusion_algorithm: i32,
+    pub diffusion_schedule: i32,
+    pub diffusion_cfg_scale: f32,
+    pub diffusion_max_tokens: i32,
 }
 
 impl Default for Config {
@@ -40,6 +46,12 @@ impl Default for Config {
             model_dir: None,
             model_map_file: None,
             lib_path: None,
+            // Diffusion defaults
+            diffusion_steps: 50,
+            diffusion_algorithm: 4,
+            diffusion_schedule: 0,
+            diffusion_cfg_scale: 0.0,
+            diffusion_max_tokens: 0,
         }
     }
 }
@@ -129,6 +141,26 @@ impl Config {
 
         if let Ok(lib_path) = std::env::var("HOSHIKAGE_LIB_PATH") {
             config.lib_path = Some(lib_path);
+        }
+
+        if let Ok(diffusion_steps) = std::env::var("DIFFUSION_STEPS") {
+            config.diffusion_steps = diffusion_steps.parse().unwrap_or(50);
+        }
+
+        if let Ok(diffusion_algorithm) = std::env::var("DIFFUSION_ALGORITHM") {
+            config.diffusion_algorithm = diffusion_algorithm.parse().unwrap_or(4);
+        }
+
+        if let Ok(diffusion_schedule) = std::env::var("DIFFUSION_SCHEDULE") {
+            config.diffusion_schedule = diffusion_schedule.parse().unwrap_or(0);
+        }
+
+        if let Ok(diffusion_cfg_scale) = std::env::var("DIFFUSION_CFG_SCALE") {
+            config.diffusion_cfg_scale = diffusion_cfg_scale.parse().unwrap_or(0.0);
+        }
+
+        if let Ok(diffusion_max_tokens) = std::env::var("DIFFUSION_MAX_TOKENS") {
+            config.diffusion_max_tokens = diffusion_max_tokens.parse().unwrap_or(0);
         }
 
         Ok(config)

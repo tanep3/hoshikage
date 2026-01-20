@@ -31,6 +31,14 @@ pub struct ChatCompletionRequest {
     pub repeat_penalty: Option<f32>,
     #[serde(default)]
     pub repeat_last_n: Option<u32>,
+    #[serde(default)]
+    pub diffusion_steps: Option<i32>,
+    #[serde(default)]
+    pub diffusion_algorithm: Option<i32>,
+    #[serde(default)]
+    pub diffusion_schedule: Option<i32>,
+    #[serde(default)]
+    pub diffusion_cfg_scale: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,10 +183,29 @@ pub async fn chat_completion(
             .repeat_penalty
             .unwrap_or(manager.default_repeat_penalty()),
         repeat_last_n: req.repeat_last_n.unwrap_or(manager.default_repeat_last_n()) as usize,
+        diffusion_steps: req.diffusion_steps,
+        diffusion_algorithm: req.diffusion_algorithm,
+        diffusion_schedule: req.diffusion_schedule,
+        diffusion_cfg_scale: req.diffusion_cfg_scale,
     };
 
     if stream_response {
-        return stream_response_handler(manager, model_name, prompt, params);
+        match manager.is_diffusion_model(&model_name).await {
+            Ok(true) => {
+                return stream_response_single(manager, model_name, prompt, params);
+            }
+            Ok(false) => {
+                return stream_response_handler(manager, model_name, prompt, params);
+            }
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "inference_failed",
+                    e.to_string(),
+                    "internal_server_error",
+                );
+            }
+        }
     }
 
     match manager.generate(&model_name, &prompt, params).await {
@@ -329,6 +356,57 @@ fn stream_response_handler(
     Sse::new(stream).into_response()
 }
 
+fn stream_response_single(
+    manager: Arc<crate::model::ModelManager>,
+    model_name: String,
+    prompt: String,
+    params: crate::inference::llama_wrapper::InferenceParams,
+) -> Response {
+    let created = chrono::Utc::now().timestamp();
+    let id = uuid::Uuid::new_v4().to_string();
+
+    let stream = stream! {
+        let output = match manager.generate(&model_name, &prompt, params).await {
+            Ok((output, _, _)) => output,
+            Err(e) => {
+                let error_payload = ErrorResponse {
+                    error: ErrorBody {
+                        code: "inference_failed".to_string(),
+                        message: e.to_string(),
+                        error_type: "internal_server_error".to_string(),
+                        param: None,
+                    },
+                };
+                let data = serde_json::to_string(&error_payload).unwrap_or_else(|_| "{}".to_string());
+                yield Ok::<Event, Infallible>(Event::default().data(data));
+                yield Ok::<Event, Infallible>(Event::default().data("[DONE]"));
+                return;
+            }
+        };
+
+        let payload = ChatCompletionChunk {
+            id: id.clone(),
+            object: "chat.completion.chunk".to_string(),
+            created,
+            model: model_name.clone(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    content: Some(output),
+                    role: Some("assistant".to_string()),
+                },
+                finish_reason: Some("stop".to_string()),
+            }],
+        };
+
+        let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        yield Ok::<Event, Infallible>(Event::default().data(data));
+        yield Ok::<Event, Infallible>(Event::default().data("[DONE]"));
+    };
+
+    Sse::new(stream).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +449,10 @@ mod tests {
             frequency_penalty: None,
             repeat_penalty: None,
             repeat_last_n: None,
+            diffusion_steps: None,
+            diffusion_algorithm: None,
+            diffusion_schedule: None,
+            diffusion_cfg_scale: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
