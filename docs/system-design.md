@@ -1,7 +1,7 @@
 # システム設計書：星影 - Rust版高速ローカル推論サーバー
 
-**バージョン:** 1.0.0  
-**作成日:** 2026-01-18  
+**バージョン:** 1.1.0  
+**作成日:** 2026-01-20  
 **言語:** Rust
 
 ---
@@ -20,6 +20,9 @@ graph TB
     API --> Resource[リソース管理<br/>tokio]
     
     LLM --> Model[GGUFモデル]
+    Model --> TypeCheck{Diffusion?}
+    TypeCheck -->|Yes| Diff[Diffusion Inference]
+    TypeCheck -->|No| AR[AR Inference]
     
     Config --> ModelDB[model_map.json]
     
@@ -163,6 +166,11 @@ pub struct ChatCompletionRequest {
     pub top_p: Option<f32>,
     pub max_tokens: Option<u32>,
     pub stream: Option<bool>,
+    // Diffusion specific
+    pub diffusion_steps: Option<i32>,
+    pub diffusion_algorithm: Option<i32>,
+    pub diffusion_schedule: Option<i32>,
+    pub cfg_scale: Option<f32>,
 }
 ```
 
@@ -240,6 +248,12 @@ Linux標準の共有メモリ領域 `/dev/shm` (tmpfs) を活用します。こ�
 - **CUDA加速**: n_gpu_layers=-1でGPUを最大活用
 - **Flash Attention**: 推論速度の最適化
 - **KV Cache**: コンテキスト管理の効率化
+
+### 5.3 Diffusion LLM 推論プロセス (v1.1.0)
+Diffusion LLM は自己回帰型とは異なるプロセスで推論を行います。
+1. **モデル判別**: `llama_model_is_diffusion` シンボルを動的にロードし、モデルが拡散型か判定。シンボルが存在しない古いライブラリの場合は AR とみなす。
+2. **符号化/反復**: `llama_decode` ではなく `llama_encode` を多用し、指定されたステップ数だけサンプリングを繰り返す。
+3. **ストリーミング**: 各ブロックの転送完了（あるいは最終結果）をOpenAI互換形式で逐次返却。
 
 ---
 
