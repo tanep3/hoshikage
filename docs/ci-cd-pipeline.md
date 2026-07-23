@@ -121,19 +121,19 @@ GitHub の Actions タブで結果を確認できます。
 
 ### 動的ライブラリについて
 
-**重要:** リリースバイナリには `libllama.so` (Linux) / `libllama.dylib` (macOS) / `llama.dll` (Windows) は含まれていません。
+**重要:** リリースバイナリには llama.cpp runtime は含まれていません。
 
-ユーザーは別途、以下のいずれかの方法でライブラリを用意する必要があります:
+ユーザーは別途、以下のいずれかの方法で `llama-server` と shared library 一式を用意する必要があります:
 
-1. **自分でビルド**: `llama.cpp` をビルドして `~/.config/hoshikage/lib/` に配置
+1. **自分でビルド**: `llama.cpp` をビルドして `~/.config/hoshikage/llama.cpp/` に配置
 2. **公式バイナリ**: llama.cpp の公式リリースからダウンロード
 
-詳細は `docs/LIBRARY_GUIDE.md` を参照してください。
+詳細は `docs/LIBRARY_GUIDE.md` と `docs/llama-cpp-install-guide.md` を参照してください。
 
 ### テストについて
 
 CI では動的ライブラリに依存しないユニットテストのみが実行されます。
-実際の推論機能のテストはローカル環境で `libllama.so` を配置した上で実行してください。
+実際の推論機能のテストはローカル環境で llama.cpp runtime を配置した上で実行してください。
 
 ---
 

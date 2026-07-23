@@ -15,6 +15,8 @@ pub fn create_router(manager: Arc<crate::model::ModelManager>) -> Router {
         .route("/", get(root))
         .route("/v1/models", get(models::models))
         .route("/v1/status", get(models::status))
+        .route("/v1/hoshikage/models", get(models::hoshikage_models))
+        .route("/v1/hoshikage/models/:name", get(models::hoshikage_model))
         .route("/v1/api/version", get(models::version))
         .route("/v1/chat/completions", post(chat::chat_completion))
         .route("/admin/models", post(admin::add_model))

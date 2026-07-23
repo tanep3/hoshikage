@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::ffi::*;
 use crate::inference::loader::DynamicLibraryLoader;
+use crate::inference::SpeculationSession;
 use libloading::Symbol;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -449,6 +450,15 @@ impl LlamaWrapper {
     }
 
     pub fn load_model(&mut self, model_path: &str, config: &Config) -> Result<()> {
+        self.load_model_with_runtime_options(model_path, config, 0)
+    }
+
+    pub fn load_model_with_runtime_options(
+        &mut self,
+        model_path: &str,
+        config: &Config,
+        n_rs_seq: u32,
+    ) -> Result<()> {
         let model_path_c = CString::new(model_path)?;
 
         unsafe {
@@ -486,7 +496,7 @@ impl LlamaWrapper {
             self.model = Some(model);
         }
 
-        let context = self.init_context(config)?;
+        let context = self.init_context(config, n_rs_seq)?;
         self.context = Some(context);
 
         Ok(())
@@ -499,7 +509,7 @@ impl LlamaWrapper {
 
         for msg in messages {
             let role = CString::new(msg.role.as_str())?;
-            let content = CString::new(msg.content.as_str())?;
+            let content = CString::new(msg.text_content())?;
             role_cstrings.push(role);
             content_cstrings.push(content);
         }
@@ -576,13 +586,13 @@ impl LlamaWrapper {
             self.context = None;
         }
 
-        let context = self.init_context(config)?;
+        let context = self.init_context(config, 0)?;
         self.context = Some(context);
 
         Ok(())
     }
 
-    fn init_context(&self, config: &Config) -> Result<*mut llama_context> {
+    fn init_context(&self, config: &Config, n_rs_seq: u32) -> Result<*mut llama_context> {
         let model = self.model.ok_or_else(|| {
             crate::error::HoshikageError::InferenceError("Model not loaded".to_string())
         })?;
@@ -612,6 +622,7 @@ impl LlamaWrapper {
             ctx_params.n_ctx = config.n_ctx;
             ctx_params.n_batch = config.n_ctx;
             ctx_params.n_ubatch = config.n_ctx;
+            ctx_params.n_rs_seq = n_rs_seq;
 
             let context = llama_init_from_model(model, ctx_params);
             if context.is_null() {
@@ -990,6 +1001,280 @@ impl LlamaWrapper {
         }
     }
 
+    pub fn generate_with_speculation(
+        &self,
+        prompt: &str,
+        params: &InferenceParams,
+        session: &SpeculationSession,
+    ) -> Result<String> {
+        let mut result = String::new();
+        self.generate_with_speculation_callback(prompt, params, session, |chunk| {
+            result.push_str(&chunk);
+            Ok(())
+        })?;
+
+        Ok(result)
+    }
+
+    pub fn generate_with_speculation_callback<F>(
+        &self,
+        prompt: &str,
+        params: &InferenceParams,
+        session: &SpeculationSession,
+        mut on_token: F,
+    ) -> Result<String>
+    where
+        F: FnMut(String) -> Result<()>,
+    {
+        let context = self.context.ok_or_else(|| {
+            crate::error::HoshikageError::InferenceError("Context not loaded".to_string())
+        })?;
+        let model = self.model.ok_or_else(|| {
+            crate::error::HoshikageError::InferenceError("Model not loaded".to_string())
+        })?;
+
+        let prompt_c = CString::new(prompt)?;
+
+        unsafe {
+            let llama_model_get_vocab: Symbol<LlamaModelGetVocab> = self
+                ._loader
+                .get_symbol("llama_model_get_vocab")
+                .map_err(|e| {
+                    crate::error::HoshikageError::LibraryLoadError(format!(
+                        "Failed to get symbol llama_model_get_vocab: {}",
+                        e
+                    ))
+                })?;
+            let vocab = llama_model_get_vocab(model);
+            if vocab.is_null() {
+                return Err(crate::error::HoshikageError::InferenceError(
+                    "Vocab not initialized".to_string(),
+                ));
+            }
+
+            let llama_tokenize: Symbol<LlamaTokenize> =
+                self._loader.get_symbol("llama_tokenize").map_err(|e| {
+                    crate::error::HoshikageError::LibraryLoadError(format!(
+                        "Failed to get symbol llama_tokenize: {}",
+                        e
+                    ))
+                })?;
+            let llama_vocab_n_tokens: Symbol<LlamaVocabNumTokens> = self
+                ._loader
+                .get_symbol("llama_vocab_n_tokens")
+                .map_err(|e| {
+                    crate::error::HoshikageError::LibraryLoadError(format!(
+                        "Failed to get symbol llama_vocab_n_tokens: {}",
+                        e
+                    ))
+                })?;
+            let llama_vocab_get_text: Symbol<LlamaVocabGetText> = self
+                ._loader
+                .get_symbol("llama_vocab_get_text")
+                .map_err(|e| {
+                    crate::error::HoshikageError::LibraryLoadError(format!(
+                        "Failed to get symbol llama_vocab_get_text: {}",
+                        e
+                    ))
+                })?;
+            let llama_token_to_piece: Symbol<LlamaTokenToPiece> = self
+                ._loader
+                .get_symbol("llama_token_to_piece")
+                .map_err(|e| {
+                    crate::error::HoshikageError::LibraryLoadError(format!(
+                        "Failed to get symbol llama_token_to_piece: {}",
+                        e
+                    ))
+                })?;
+            let llama_decode: Symbol<LlamaDecode> =
+                self._loader.get_symbol("llama_decode").map_err(|e| {
+                    crate::error::HoshikageError::LibraryLoadError(format!(
+                        "Failed to get symbol llama_decode: {}",
+                        e
+                    ))
+                })?;
+            let llama_batch_init: Symbol<LlamaBatchInit> =
+                self._loader.get_symbol("llama_batch_init").map_err(|e| {
+                    crate::error::HoshikageError::LibraryLoadError(format!(
+                        "Failed to get symbol llama_batch_init: {}",
+                        e
+                    ))
+                })?;
+            let llama_batch_free: Symbol<LlamaBatchFree> =
+                self._loader.get_symbol("llama_batch_free").map_err(|e| {
+                    crate::error::HoshikageError::LibraryLoadError(format!(
+                        "Failed to get symbol llama_batch_free: {}",
+                        e
+                    ))
+                })?;
+            let llama_get_logits_ith: Symbol<LlamaGetLogitsIth> = self
+                ._loader
+                .get_symbol("llama_get_logits_ith")
+                .map_err(|e| {
+                    crate::error::HoshikageError::LibraryLoadError(format!(
+                        "Failed to get symbol llama_get_logits_ith: {}",
+                        e
+                    ))
+                })?;
+
+            let mut tokens = vec![0i32; 8192];
+            let n_tokens = llama_tokenize(
+                vocab,
+                prompt_c.as_ptr(),
+                prompt.len() as i32,
+                tokens.as_mut_ptr(),
+                tokens.len() as i32,
+                true,
+                true,
+            );
+
+            if n_tokens <= 0 {
+                return Err(crate::error::HoshikageError::InferenceError(
+                    "Tokenization failed".to_string(),
+                ));
+            }
+            tokens.truncate(n_tokens as usize);
+
+            let vocab_size = llama_vocab_n_tokens(vocab);
+            if vocab_size <= 0 {
+                return Err(crate::error::HoshikageError::InferenceError(
+                    "Invalid vocab size".to_string(),
+                ));
+            }
+
+            let seq_id: llama_seq_id = 0;
+            let mut position: i32 = 0;
+            let mut prompt_tgt: Vec<llama_token> = Vec::with_capacity(8192);
+            let mut token_counts: HashMap<i32, u32> = HashMap::new();
+            let mut recent_tokens: VecDeque<i32> = VecDeque::new();
+            let repeat_last_n = params.repeat_last_n.min(8192);
+
+            let prefill_len = tokens.len().saturating_sub(1);
+            for &token in tokens.iter().take(prefill_len) {
+                self.decode_single_token(
+                    context,
+                    token,
+                    position,
+                    seq_id,
+                    false,
+                    &llama_decode,
+                    &llama_batch_init,
+                    &llama_batch_free,
+                    Some(session),
+                )?;
+                position += 1;
+                prompt_tgt.push(token);
+                Self::remember_token(token, &mut token_counts, &mut recent_tokens, repeat_last_n);
+            }
+
+            let mut id_last = *tokens.last().ok_or_else(|| {
+                crate::error::HoshikageError::InferenceError("Prompt has no tokens".to_string())
+            })?;
+            Self::remember_token(
+                id_last,
+                &mut token_counts,
+                &mut recent_tokens,
+                repeat_last_n,
+            );
+
+            let mut result = String::new();
+            let mut pending_bytes: Vec<u8> = Vec::new();
+            let mut generated_tokens = 0_i32;
+            let mut draft_buf = vec![LLAMA_TOKEN_NULL; 16];
+
+            while generated_tokens < params.max_tokens.min(4096_i32) {
+                let n_past = position;
+                let n_draft =
+                    session.draft(seq_id, n_past, id_last, &prompt_tgt, &mut draft_buf)?;
+
+                let mut verify_tokens = Vec::with_capacity(n_draft + 1);
+                verify_tokens.push(id_last);
+                verify_tokens.extend_from_slice(&draft_buf[..n_draft]);
+
+                let mut sampled = self.decode_and_sample_speculative_batch(
+                    context,
+                    &verify_tokens,
+                    n_past,
+                    seq_id,
+                    vocab_size,
+                    params,
+                    &token_counts,
+                    &recent_tokens,
+                    repeat_last_n,
+                    &llama_decode,
+                    &llama_batch_init,
+                    &llama_batch_free,
+                    &llama_get_logits_ith,
+                    session,
+                )?;
+
+                if sampled.is_empty() {
+                    break;
+                }
+
+                let mut accepted_draft = 0usize;
+                while accepted_draft < n_draft
+                    && accepted_draft < sampled.len()
+                    && sampled[accepted_draft] == draft_buf[accepted_draft]
+                {
+                    accepted_draft += 1;
+                }
+                if n_draft > 0 {
+                    session.accept(seq_id, accepted_draft as u16);
+                }
+
+                let emit_count = accepted_draft + 1;
+                sampled.truncate(emit_count.min(sampled.len()));
+
+                for token in sampled {
+                    prompt_tgt.push(id_last);
+                    id_last = token;
+                    position += 1;
+
+                    if let Ok(stop_hit) = Self::is_stop_token(
+                        vocab,
+                        token,
+                        &params.stop_sequences,
+                        &llama_vocab_get_text,
+                    ) {
+                        if stop_hit && generated_tokens > 0 {
+                            return Ok(result);
+                        }
+                    }
+
+                    Self::remember_token(
+                        token,
+                        &mut token_counts,
+                        &mut recent_tokens,
+                        repeat_last_n,
+                    );
+                    Self::emit_token_piece(
+                        vocab,
+                        token,
+                        &llama_token_to_piece,
+                        &mut pending_bytes,
+                        &mut result,
+                        &mut on_token,
+                    )?;
+                    generated_tokens += 1;
+
+                    for stop_seq in &params.stop_sequences {
+                        if result.ends_with(stop_seq) {
+                            result = result[..result.len() - stop_seq.len()].to_string();
+                            return Ok(result);
+                        }
+                    }
+
+                    if generated_tokens >= params.max_tokens.min(4096_i32) {
+                        break;
+                    }
+                }
+            }
+
+            Ok(result)
+        }
+    }
+
     fn is_stop_token(
         vocab: *const llama_vocab,
         token: llama_token,
@@ -1007,6 +1292,235 @@ impl LlamaWrapper {
             .to_string_lossy()
             .to_string();
         Ok(stop_sequences.iter().any(|s| s == &text))
+    }
+
+    fn remember_token(
+        token: llama_token,
+        token_counts: &mut HashMap<i32, u32>,
+        recent_tokens: &mut VecDeque<i32>,
+        repeat_last_n: usize,
+    ) {
+        *token_counts.entry(token).or_insert(0) += 1;
+        if repeat_last_n > 0 {
+            recent_tokens.push_back(token);
+            if recent_tokens.len() > repeat_last_n {
+                recent_tokens.pop_front();
+            }
+        }
+    }
+
+    fn decode_single_token(
+        &self,
+        context: *mut llama_context,
+        token: llama_token,
+        pos: llama_pos,
+        seq_id: llama_seq_id,
+        output_logits: bool,
+        llama_decode: &Symbol<LlamaDecode>,
+        llama_batch_init: &Symbol<LlamaBatchInit>,
+        llama_batch_free: &Symbol<LlamaBatchFree>,
+        speculation: Option<&SpeculationSession>,
+    ) -> Result<()> {
+        let mut batch = unsafe { llama_batch_init(1, 0, 1) };
+        if batch.token.is_null()
+            || batch.pos.is_null()
+            || batch.n_seq_id.is_null()
+            || batch.seq_id.is_null()
+            || batch.logits.is_null()
+        {
+            unsafe { llama_batch_free(batch) };
+            return Err(crate::error::HoshikageError::InferenceError(
+                "Failed to init llama_batch".to_string(),
+            ));
+        }
+
+        unsafe {
+            batch.n_tokens = 1;
+            *batch.token = token;
+            *batch.pos = pos;
+            *batch.n_seq_id = 1;
+            **batch.seq_id = seq_id;
+            *batch.logits = if output_logits || speculation.is_some() {
+                1
+            } else {
+                0
+            };
+        }
+
+        if unsafe { llama_decode(context, batch) } < 0 {
+            unsafe { llama_batch_free(batch) };
+            return Err(crate::error::HoshikageError::InferenceError(
+                "Decode failed".to_string(),
+            ));
+        }
+
+        let process_result = if let Some(speculation) = speculation {
+            speculation.process(&batch)
+        } else {
+            Ok(())
+        };
+        unsafe { llama_batch_free(batch) };
+        if let Err(error) = process_result {
+            return Err(error);
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decode_and_sample_speculative_batch(
+        &self,
+        context: *mut llama_context,
+        tokens: &[llama_token],
+        n_past: llama_pos,
+        seq_id: llama_seq_id,
+        vocab_size: i32,
+        params: &InferenceParams,
+        token_counts: &HashMap<i32, u32>,
+        recent_tokens: &VecDeque<i32>,
+        repeat_last_n: usize,
+        llama_decode: &Symbol<LlamaDecode>,
+        llama_batch_init: &Symbol<LlamaBatchInit>,
+        llama_batch_free: &Symbol<LlamaBatchFree>,
+        llama_get_logits_ith: &Symbol<LlamaGetLogitsIth>,
+        speculation: &SpeculationSession,
+    ) -> Result<Vec<llama_token>> {
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut batch = unsafe { llama_batch_init(tokens.len() as i32, 0, 1) };
+        if batch.token.is_null()
+            || batch.pos.is_null()
+            || batch.n_seq_id.is_null()
+            || batch.seq_id.is_null()
+            || batch.logits.is_null()
+        {
+            unsafe { llama_batch_free(batch) };
+            return Err(crate::error::HoshikageError::InferenceError(
+                "Failed to init llama_batch".to_string(),
+            ));
+        }
+
+        unsafe {
+            batch.n_tokens = tokens.len() as i32;
+            for (i, token) in tokens.iter().enumerate() {
+                *batch.token.add(i) = *token;
+                *batch.pos.add(i) = n_past + i as llama_pos;
+                *batch.n_seq_id.add(i) = 1;
+                **batch.seq_id.add(i) = seq_id;
+                *batch.logits.add(i) = 1;
+            }
+        }
+
+        if unsafe { llama_decode(context, batch) } < 0 {
+            unsafe { llama_batch_free(batch) };
+            return Err(crate::error::HoshikageError::InferenceError(
+                "Decode failed".to_string(),
+            ));
+        }
+
+        if let Err(error) = speculation.process(&batch) {
+            unsafe { llama_batch_free(batch) };
+            return Err(error);
+        }
+
+        let mut sampled = Vec::with_capacity(tokens.len());
+        for i in 0..tokens.len() {
+            let logits_ptr = unsafe { llama_get_logits_ith(context, i as i32) };
+            if logits_ptr.is_null() {
+                break;
+            }
+            let logits_slice =
+                unsafe { std::slice::from_raw_parts(logits_ptr, vocab_size as usize) };
+            let mut adjusted_logits = logits_slice.to_vec();
+            apply_penalties(
+                &mut adjusted_logits,
+                token_counts,
+                params.presence_penalty,
+                params.frequency_penalty,
+            );
+            if repeat_last_n > 0 {
+                apply_repeat_penalty(
+                    &mut adjusted_logits,
+                    recent_tokens.as_slices().0,
+                    params.repeat_penalty,
+                );
+                apply_repeat_penalty(
+                    &mut adjusted_logits,
+                    recent_tokens.as_slices().1,
+                    params.repeat_penalty,
+                );
+            }
+            let token = match sample_token(&adjusted_logits, params.temperature, params.top_p) {
+                Ok(token) => token,
+                Err(error) => {
+                    unsafe { llama_batch_free(batch) };
+                    return Err(error);
+                }
+            };
+            sampled.push(token);
+        }
+
+        unsafe { llama_batch_free(batch) };
+        Ok(sampled)
+    }
+
+    fn emit_token_piece<F>(
+        vocab: *const llama_vocab,
+        token: llama_token,
+        llama_token_to_piece: &Symbol<LlamaTokenToPiece>,
+        pending_bytes: &mut Vec<u8>,
+        result: &mut String,
+        on_token: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(String) -> Result<()>,
+    {
+        let mut buf = vec![0i8; 256];
+        let mut n = unsafe {
+            llama_token_to_piece(vocab, token, buf.as_mut_ptr(), buf.len() as i32, 0, false)
+        };
+        if n < 0 {
+            let needed = (-n) as usize;
+            buf.resize(needed, 0);
+            n = unsafe {
+                llama_token_to_piece(vocab, token, buf.as_mut_ptr(), buf.len() as i32, 0, false)
+            };
+        }
+
+        if n <= 0 {
+            return Ok(());
+        }
+
+        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n as usize) };
+        pending_bytes.extend_from_slice(bytes);
+
+        loop {
+            match std::str::from_utf8(pending_bytes) {
+                Ok(valid) => {
+                    if !valid.is_empty() {
+                        on_token(valid.to_string())?;
+                        result.push_str(valid);
+                    }
+                    pending_bytes.clear();
+                    break;
+                }
+                Err(err) => {
+                    let valid_up_to = err.valid_up_to();
+                    if valid_up_to == 0 {
+                        break;
+                    }
+                    let valid =
+                        unsafe { std::str::from_utf8_unchecked(&pending_bytes[..valid_up_to]) };
+                    on_token(valid.to_string())?;
+                    result.push_str(valid);
+                    pending_bytes.drain(..valid_up_to);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn generate_diffusion(
@@ -1833,6 +2347,20 @@ impl LlamaWrapper {
 
     pub fn is_loaded(&self) -> bool {
         self.model.is_some() && self.context.is_some()
+    }
+
+    pub(crate) fn model_ptr(&self) -> Result<*const llama_model> {
+        self.model
+            .map(|model| model as *const llama_model)
+            .ok_or_else(|| {
+                crate::error::HoshikageError::InferenceError("Model not loaded".to_string())
+            })
+    }
+
+    pub(crate) fn context_ptr(&self) -> Result<*mut llama_context> {
+        self.context.ok_or_else(|| {
+            crate::error::HoshikageError::InferenceError("Context not loaded".to_string())
+        })
     }
 
     pub fn is_diffusion_model(&self) -> Result<bool> {

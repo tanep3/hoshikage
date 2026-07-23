@@ -78,8 +78,9 @@ OpenAIのChatGPT公式APIと同じ規格（`/v1/chat/completions`）で通信で
 **優先度: 高**  
 世界的に定評のある `llama.cpp` という技術を採用し、NVIDIA製GPU（CUDA）を使って可能な限り高速に返事を生成します。
 **ライブラリ運用:**
-- 動的ライブラリ（`libllama.so`）を使用します。
-- ライブラリ配置場所: `~/.config/hoshikage/lib/` を標準とします。ユーザー自身がビルドしたライブラリをここに置くことも可能です。
+- managed `llama-server` を主 runtime として使用します。
+- runtime 配置場所: `~/.config/hoshikage/llama.cpp/` を標準とします。
+- FFI 互換経路では、同じ runtime directory の `libllama.so` などの shared library を参照します。
 
 ### 🏎️ FT-007: RAMディスク運用 (ロード時間短縮)
 **優先度: 高**  
@@ -103,6 +104,14 @@ LLaDAやRND1などの拡散型言語モデル (Diffusion LLM) の推論をサポ
 - **自動検知**: モデルロード時に `llama_model_is_diffusion` を用いてモデルタイプを自動判別します。
 - **推論アルゴリズム**: 標準的なAR（自己回帰）推論に代わり、Diffusion固有の反復的なサンプリングプロセスを実行します。
 - **OpenAI互換ストリーミング**: Diffusionモデルの生成過程もOpenAI互換のストリーミング形式で返却可能です。
+
+### 🧭 FT-010: 最新モデルランタイム改訂
+**優先度: 高**
+Hoshikage は、最新の GGUF モデル機能に追従するため、QAT などの量子化済みモデル運用、MTP、Draft model、Vision 入力、Model Bundle 管理、Runtime Capability 診断、推論性能メトリクスを扱える推論基盤へ拡張します。
+
+詳細要件は [model-runtime-revision-requirements.md](model-runtime-revision-requirements.md) に分離して定義します。
+
+本改訂では、managed `llama-server` runtime を主経路とし、12B QAT + MTP + Vision bundle を Hoshikage 経由で低レイテンシ運用できることを確認済みです。標準運用では VRAM 滞在時間を `IDLE_TIMEOUT`、RAM ディスク滞在時間を `GREAT_TIMEOUT` で管理し、`llama-server` 独自の idle sleep は使いません。
 
 ---
 

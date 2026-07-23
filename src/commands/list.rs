@@ -18,7 +18,13 @@ struct ModelListResponse {
     pub data: Vec<ModelData>,
 }
 
-async fn list_via_api(port: u16) -> Result<()> {
+async fn list_via_api(port: u16, details: bool) -> Result<()> {
+    if details {
+        println!("Detailed model listing is available when the server is stopped.");
+        println!("The OpenAI-compatible /v1/models API intentionally returns model IDs only.");
+        println!();
+    }
+
     let url = format!("http://127.0.0.1:{}/v1/models", port);
     let client = Client::new();
 
@@ -61,7 +67,7 @@ async fn list_via_api(port: u16) -> Result<()> {
     )))
 }
 
-fn list_directly() -> Result<()> {
+fn list_directly(details: bool) -> Result<()> {
     let config_dir = dirs::config_dir().ok_or_else(|| {
         crate::error::HoshikageError::ConfigError("Config directory not found".to_string())
     })?;
@@ -85,7 +91,11 @@ fn list_directly() -> Result<()> {
         println!("No models registered");
     } else {
         for (name, config) in &models {
-            println!("  - {} ({})", name, config.model);
+            if details {
+                print_model_details(name, config);
+            } else {
+                println!("  - {} ({})", name, config.model);
+            }
         }
     }
 
@@ -95,11 +105,30 @@ fn list_directly() -> Result<()> {
     Ok(())
 }
 
-pub async fn list_models(port: u16) -> Result<()> {
+pub async fn list_models(port: u16, details: bool) -> Result<()> {
     if check_server_running(port).await {
-        list_via_api(port).await
+        list_via_api(port, details).await
     } else {
-        list_directly()
+        list_directly(details)
+    }
+}
+
+fn print_model_details(name: &str, config: &crate::model::ModelConfig) {
+    println!("  - {}", name);
+    println!("    main: {}", config.main_model_path().display());
+    if let Some(mmproj) = &config.mmproj {
+        println!("    mmproj: {}", mmproj);
+    }
+    if let Some(drafter) = &config.drafter {
+        println!("    drafter: {}", drafter);
+    }
+    println!("    speculation: {:?}", config.speculation.modes);
+    println!("    thinking: {:?}", config.thinking.mode);
+    if let Some(n_ctx) = config.n_ctx {
+        println!("    n_ctx: {}", n_ctx);
+    }
+    if let Some(n_gpu_layers) = config.n_gpu_layers {
+        println!("    n_gpu_layers: {}", n_gpu_layers);
     }
 }
 

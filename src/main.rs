@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use hoshikage::api;
-use hoshikage::commands::{add_model, list_models, remove_model};
+use hoshikage::commands::{add_model, doctor, list_models, remove_model};
 use hoshikage::config::Config;
 use hoshikage::error::HoshikageError;
 use hoshikage::model::ModelManager;
@@ -27,6 +27,20 @@ enum Commands {
         path: String,
         #[arg(value_name = "LABEL")]
         label: String,
+        #[arg(long, value_name = "PATH")]
+        mmproj: Option<String>,
+        #[arg(long, value_name = "PATH")]
+        mtp_drafter: Option<String>,
+        #[arg(long, value_name = "PATH")]
+        draft_model: Option<String>,
+        #[arg(long)]
+        thinking_off: bool,
+        #[arg(long, value_name = "N")]
+        n_ctx: Option<u32>,
+        #[arg(long, value_name = "N", allow_hyphen_values = true)]
+        n_gpu_layers: Option<i32>,
+        #[arg(long)]
+        check: bool,
         #[arg(value_name = "STOP_WORDS", num_args = 0..)]
         stop_words: Vec<String>,
     },
@@ -34,7 +48,16 @@ enum Commands {
         #[arg(value_name = "LABEL")]
         label: String,
     },
-    List,
+    List {
+        #[arg(long)]
+        details: bool,
+    },
+    Doctor {
+        #[arg(long, value_name = "LABEL")]
+        model: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -46,15 +69,38 @@ async fn main() -> hoshikage::Result<()> {
             Commands::Add {
                 path,
                 label,
+                mmproj,
+                mtp_drafter,
+                draft_model,
+                thinking_off,
+                n_ctx,
+                n_gpu_layers,
+                check,
                 stop_words,
             } => {
-                add_model(path, label, stop_words, cli.port).await?;
+                add_model(
+                    path,
+                    label,
+                    stop_words,
+                    mmproj,
+                    mtp_drafter,
+                    draft_model,
+                    thinking_off,
+                    n_ctx,
+                    n_gpu_layers,
+                    check,
+                    cli.port,
+                )
+                .await?;
             }
             Commands::Rm { label } => {
                 remove_model(label, cli.port).await?;
             }
-            Commands::List => {
-                list_models(cli.port).await?;
+            Commands::List { details } => {
+                list_models(cli.port, details).await?;
+            }
+            Commands::Doctor { model, json } => {
+                doctor(model, json).await?;
             }
         }
         return Ok(());

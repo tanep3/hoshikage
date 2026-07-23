@@ -22,6 +22,7 @@ pub const GGML_ROPE_TYPE_VISION: u32 = 24;
 pub const GGML_ROPE_TYPE_IMROPE: u32 = 40;
 pub const GGML_MROPE_SECTIONS: u32 = 4;
 pub const GGML_N_TASKS_MAX: i32 = -1;
+pub const GGML_BACKEND_META_MAX_DEVICES: u32 = 16;
 pub const LLAMA_DEFAULT_SEED: u32 = 4294967295;
 pub const LLAMA_TOKEN_NULL: i32 = -1;
 pub const LLAMA_FILE_MAGIC_GGLA: u32 = 1734831201;
@@ -31,8 +32,10 @@ pub const LLAMA_SESSION_MAGIC: u32 = 1734833006;
 pub const LLAMA_SESSION_VERSION: u32 = 9;
 pub const LLAMA_STATE_SEQ_MAGIC: u32 = 1734833009;
 pub const LLAMA_STATE_SEQ_VERSION: u32 = 2;
+pub const LLAMA_STATE_SEQ_FLAGS_NONE: u32 = 0;
 pub const LLAMA_STATE_SEQ_FLAGS_SWA_ONLY: u32 = 1;
 pub const LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY: u32 = 1;
+pub const LLAMA_STATE_SEQ_FLAGS_ON_DEVICE: u32 = 2;
 pub type __off_t = ::std::os::raw::c_long;
 pub type __off64_t = ::std::os::raw::c_long;
 pub type FILE = _IO_FILE;
@@ -516,11 +519,17 @@ pub const ggml_type_GGML_TYPE_BF16: ggml_type = 30;
 pub const ggml_type_GGML_TYPE_TQ1_0: ggml_type = 34;
 pub const ggml_type_GGML_TYPE_TQ2_0: ggml_type = 35;
 pub const ggml_type_GGML_TYPE_MXFP4: ggml_type = 39;
-pub const ggml_type_GGML_TYPE_COUNT: ggml_type = 40;
+pub const ggml_type_GGML_TYPE_NVFP4: ggml_type = 40;
+pub const ggml_type_GGML_TYPE_Q1_0: ggml_type = 41;
+pub const ggml_type_GGML_TYPE_Q2_0: ggml_type = 42;
+pub const ggml_type_GGML_TYPE_COUNT: ggml_type = 43;
 pub type ggml_type = ::std::os::raw::c_uint;
 pub const ggml_prec_GGML_PREC_DEFAULT: ggml_prec = 0;
 pub const ggml_prec_GGML_PREC_F32: ggml_prec = 10;
 pub type ggml_prec = ::std::os::raw::c_uint;
+pub const ggml_op_hint_GGML_HINT_NONE: ggml_op_hint = 0;
+pub const ggml_op_hint_GGML_HINT_SRC0_IS_HADAMARD: ggml_op_hint = 1;
+pub type ggml_op_hint = ::std::os::raw::c_uint;
 pub const ggml_ftype_GGML_FTYPE_UNKNOWN: ggml_ftype = -1;
 pub const ggml_ftype_GGML_FTYPE_ALL_F32: ggml_ftype = 0;
 pub const ggml_ftype_GGML_FTYPE_MOSTLY_F16: ggml_ftype = 1;
@@ -546,6 +555,9 @@ pub const ggml_ftype_GGML_FTYPE_MOSTLY_IQ4_XS: ggml_ftype = 22;
 pub const ggml_ftype_GGML_FTYPE_MOSTLY_IQ1_M: ggml_ftype = 23;
 pub const ggml_ftype_GGML_FTYPE_MOSTLY_BF16: ggml_ftype = 24;
 pub const ggml_ftype_GGML_FTYPE_MOSTLY_MXFP4: ggml_ftype = 25;
+pub const ggml_ftype_GGML_FTYPE_MOSTLY_NVFP4: ggml_ftype = 26;
+pub const ggml_ftype_GGML_FTYPE_MOSTLY_Q1_0: ggml_ftype = 27;
+pub const ggml_ftype_GGML_FTYPE_MOSTLY_Q2_0: ggml_ftype = 28;
 pub type ggml_ftype = ::std::os::raw::c_int;
 pub const ggml_op_GGML_OP_NONE: ggml_op = 0;
 pub const ggml_op_GGML_OP_DUP: ggml_op = 1;
@@ -602,47 +614,53 @@ pub const ggml_op_GGML_OP_CONV_TRANSPOSE_1D: ggml_op = 51;
 pub const ggml_op_GGML_OP_IM2COL: ggml_op = 52;
 pub const ggml_op_GGML_OP_IM2COL_BACK: ggml_op = 53;
 pub const ggml_op_GGML_OP_IM2COL_3D: ggml_op = 54;
-pub const ggml_op_GGML_OP_CONV_2D: ggml_op = 55;
-pub const ggml_op_GGML_OP_CONV_3D: ggml_op = 56;
-pub const ggml_op_GGML_OP_CONV_2D_DW: ggml_op = 57;
-pub const ggml_op_GGML_OP_CONV_TRANSPOSE_2D: ggml_op = 58;
-pub const ggml_op_GGML_OP_POOL_1D: ggml_op = 59;
-pub const ggml_op_GGML_OP_POOL_2D: ggml_op = 60;
-pub const ggml_op_GGML_OP_POOL_2D_BACK: ggml_op = 61;
-pub const ggml_op_GGML_OP_UPSCALE: ggml_op = 62;
-pub const ggml_op_GGML_OP_PAD: ggml_op = 63;
-pub const ggml_op_GGML_OP_PAD_REFLECT_1D: ggml_op = 64;
-pub const ggml_op_GGML_OP_ROLL: ggml_op = 65;
-pub const ggml_op_GGML_OP_ARANGE: ggml_op = 66;
-pub const ggml_op_GGML_OP_TIMESTEP_EMBEDDING: ggml_op = 67;
-pub const ggml_op_GGML_OP_ARGSORT: ggml_op = 68;
-pub const ggml_op_GGML_OP_TOP_K: ggml_op = 69;
-pub const ggml_op_GGML_OP_LEAKY_RELU: ggml_op = 70;
-pub const ggml_op_GGML_OP_TRI: ggml_op = 71;
-pub const ggml_op_GGML_OP_FILL: ggml_op = 72;
-pub const ggml_op_GGML_OP_FLASH_ATTN_EXT: ggml_op = 73;
-pub const ggml_op_GGML_OP_FLASH_ATTN_BACK: ggml_op = 74;
-pub const ggml_op_GGML_OP_SSM_CONV: ggml_op = 75;
-pub const ggml_op_GGML_OP_SSM_SCAN: ggml_op = 76;
-pub const ggml_op_GGML_OP_WIN_PART: ggml_op = 77;
-pub const ggml_op_GGML_OP_WIN_UNPART: ggml_op = 78;
-pub const ggml_op_GGML_OP_GET_REL_POS: ggml_op = 79;
-pub const ggml_op_GGML_OP_ADD_REL_POS: ggml_op = 80;
-pub const ggml_op_GGML_OP_RWKV_WKV6: ggml_op = 81;
-pub const ggml_op_GGML_OP_GATED_LINEAR_ATTN: ggml_op = 82;
-pub const ggml_op_GGML_OP_RWKV_WKV7: ggml_op = 83;
-pub const ggml_op_GGML_OP_SOLVE_TRI: ggml_op = 84;
-pub const ggml_op_GGML_OP_UNARY: ggml_op = 85;
-pub const ggml_op_GGML_OP_MAP_CUSTOM1: ggml_op = 86;
-pub const ggml_op_GGML_OP_MAP_CUSTOM2: ggml_op = 87;
-pub const ggml_op_GGML_OP_MAP_CUSTOM3: ggml_op = 88;
-pub const ggml_op_GGML_OP_CUSTOM: ggml_op = 89;
-pub const ggml_op_GGML_OP_CROSS_ENTROPY_LOSS: ggml_op = 90;
-pub const ggml_op_GGML_OP_CROSS_ENTROPY_LOSS_BACK: ggml_op = 91;
-pub const ggml_op_GGML_OP_OPT_STEP_ADAMW: ggml_op = 92;
-pub const ggml_op_GGML_OP_OPT_STEP_SGD: ggml_op = 93;
-pub const ggml_op_GGML_OP_GLU: ggml_op = 94;
-pub const ggml_op_GGML_OP_COUNT: ggml_op = 95;
+pub const ggml_op_GGML_OP_COL2IM_1D: ggml_op = 55;
+pub const ggml_op_GGML_OP_CONV_2D: ggml_op = 56;
+pub const ggml_op_GGML_OP_CONV_3D: ggml_op = 57;
+pub const ggml_op_GGML_OP_CONV_2D_DW: ggml_op = 58;
+pub const ggml_op_GGML_OP_CONV_TRANSPOSE_2D: ggml_op = 59;
+pub const ggml_op_GGML_OP_POOL_1D: ggml_op = 60;
+pub const ggml_op_GGML_OP_POOL_2D: ggml_op = 61;
+pub const ggml_op_GGML_OP_POOL_2D_BACK: ggml_op = 62;
+pub const ggml_op_GGML_OP_UPSCALE: ggml_op = 63;
+pub const ggml_op_GGML_OP_PAD: ggml_op = 64;
+pub const ggml_op_GGML_OP_PAD_REFLECT_1D: ggml_op = 65;
+pub const ggml_op_GGML_OP_ROLL: ggml_op = 66;
+pub const ggml_op_GGML_OP_ARANGE: ggml_op = 67;
+pub const ggml_op_GGML_OP_TIMESTEP_EMBEDDING: ggml_op = 68;
+pub const ggml_op_GGML_OP_ARGSORT: ggml_op = 69;
+pub const ggml_op_GGML_OP_TOP_K: ggml_op = 70;
+pub const ggml_op_GGML_OP_LEAKY_RELU: ggml_op = 71;
+pub const ggml_op_GGML_OP_TRI: ggml_op = 72;
+pub const ggml_op_GGML_OP_FILL: ggml_op = 73;
+pub const ggml_op_GGML_OP_FLASH_ATTN_EXT: ggml_op = 74;
+pub const ggml_op_GGML_OP_FLASH_ATTN_BACK: ggml_op = 75;
+pub const ggml_op_GGML_OP_SSM_CONV: ggml_op = 76;
+pub const ggml_op_GGML_OP_SSM_SCAN: ggml_op = 77;
+pub const ggml_op_GGML_OP_WIN_PART: ggml_op = 78;
+pub const ggml_op_GGML_OP_WIN_UNPART: ggml_op = 79;
+pub const ggml_op_GGML_OP_GET_REL_POS: ggml_op = 80;
+pub const ggml_op_GGML_OP_ADD_REL_POS: ggml_op = 81;
+pub const ggml_op_GGML_OP_RWKV_WKV6: ggml_op = 82;
+pub const ggml_op_GGML_OP_GATED_LINEAR_ATTN: ggml_op = 83;
+pub const ggml_op_GGML_OP_RWKV_WKV7: ggml_op = 84;
+pub const ggml_op_GGML_OP_SOLVE_TRI: ggml_op = 85;
+pub const ggml_op_GGML_OP_GATED_DELTA_NET: ggml_op = 86;
+pub const ggml_op_GGML_OP_LIGHTNING_INDEXER: ggml_op = 87;
+pub const ggml_op_GGML_OP_DSV4_HC_COMB: ggml_op = 88;
+pub const ggml_op_GGML_OP_DSV4_HC_PRE: ggml_op = 89;
+pub const ggml_op_GGML_OP_DSV4_HC_POST: ggml_op = 90;
+pub const ggml_op_GGML_OP_UNARY: ggml_op = 91;
+pub const ggml_op_GGML_OP_MAP_CUSTOM1: ggml_op = 92;
+pub const ggml_op_GGML_OP_MAP_CUSTOM2: ggml_op = 93;
+pub const ggml_op_GGML_OP_MAP_CUSTOM3: ggml_op = 94;
+pub const ggml_op_GGML_OP_CUSTOM: ggml_op = 95;
+pub const ggml_op_GGML_OP_CROSS_ENTROPY_LOSS: ggml_op = 96;
+pub const ggml_op_GGML_OP_CROSS_ENTROPY_LOSS_BACK: ggml_op = 97;
+pub const ggml_op_GGML_OP_OPT_STEP_ADAMW: ggml_op = 98;
+pub const ggml_op_GGML_OP_OPT_STEP_SGD: ggml_op = 99;
+pub const ggml_op_GGML_OP_GLU: ggml_op = 100;
+pub const ggml_op_GGML_OP_COUNT: ggml_op = 101;
 pub type ggml_op = ::std::os::raw::c_uint;
 pub const ggml_unary_op_GGML_UNARY_OP_ABS: ggml_unary_op = 0;
 pub const ggml_unary_op_GGML_UNARY_OP_SGN: ggml_unary_op = 1;
@@ -691,6 +709,7 @@ pub const ggml_tensor_flag_GGML_TENSOR_FLAG_INPUT: ggml_tensor_flag = 1;
 pub const ggml_tensor_flag_GGML_TENSOR_FLAG_OUTPUT: ggml_tensor_flag = 2;
 pub const ggml_tensor_flag_GGML_TENSOR_FLAG_PARAM: ggml_tensor_flag = 4;
 pub const ggml_tensor_flag_GGML_TENSOR_FLAG_LOSS: ggml_tensor_flag = 8;
+pub const ggml_tensor_flag_GGML_TENSOR_FLAG_COMPUTE: ggml_tensor_flag = 16;
 pub type ggml_tensor_flag = ::std::os::raw::c_uint;
 pub const ggml_tri_type_GGML_TRI_TYPE_UPPER_DIAG: ggml_tri_type = 0;
 pub const ggml_tri_type_GGML_TRI_TYPE_UPPER: ggml_tri_type = 1;
@@ -1024,6 +1043,9 @@ extern "C" {
     pub fn ggml_is_empty(tensor: *const ggml_tensor) -> bool;
 }
 extern "C" {
+    pub fn ggml_is_view(tensor: *const ggml_tensor) -> bool;
+}
+extern "C" {
     pub fn ggml_is_scalar(tensor: *const ggml_tensor) -> bool;
 }
 extern "C" {
@@ -1049,6 +1071,15 @@ extern "C" {
 }
 extern "C" {
     pub fn ggml_is_contiguous_2(tensor: *const ggml_tensor) -> bool;
+}
+extern "C" {
+    pub fn ggml_is_contiguous_to_1(tensor: *const ggml_tensor) -> bool;
+}
+extern "C" {
+    pub fn ggml_is_contiguous_to_2(tensor: *const ggml_tensor) -> bool;
+}
+extern "C" {
+    pub fn ggml_is_contiguous_to_3(tensor: *const ggml_tensor) -> bool;
 }
 extern "C" {
     pub fn ggml_is_contiguously_allocated(tensor: *const ggml_tensor) -> bool;
@@ -1725,6 +1756,9 @@ extern "C" {
     pub fn ggml_mul_mat_set_prec(a: *mut ggml_tensor, prec: ggml_prec);
 }
 extern "C" {
+    pub fn ggml_mul_mat_set_hint(a: *mut ggml_tensor, hint: ggml_op_hint);
+}
+extern "C" {
     pub fn ggml_mul_mat_id(
         ctx: *mut ggml_context,
         as_: *mut ggml_tensor,
@@ -2269,6 +2303,15 @@ extern "C" {
     ) -> *mut ggml_tensor;
 }
 extern "C" {
+    pub fn ggml_col2im_1d(
+        ctx: *mut ggml_context,
+        a: *mut ggml_tensor,
+        s0: ::std::os::raw::c_int,
+        oc: ::std::os::raw::c_int,
+        p0: ::std::os::raw::c_int,
+    ) -> *mut ggml_tensor;
+}
+extern "C" {
     pub fn ggml_conv_1d(
         ctx: *mut ggml_context,
         a: *mut ggml_tensor,
@@ -2794,6 +2837,53 @@ extern "C" {
         uni: bool,
     ) -> *mut ggml_tensor;
 }
+extern "C" {
+    pub fn ggml_gated_delta_net(
+        ctx: *mut ggml_context,
+        q: *mut ggml_tensor,
+        k: *mut ggml_tensor,
+        v: *mut ggml_tensor,
+        g: *mut ggml_tensor,
+        beta: *mut ggml_tensor,
+        state: *mut ggml_tensor,
+        K: i64,
+    ) -> *mut ggml_tensor;
+}
+extern "C" {
+    pub fn ggml_lightning_indexer(
+        ctx: *mut ggml_context,
+        q: *mut ggml_tensor,
+        k: *mut ggml_tensor,
+        weights: *mut ggml_tensor,
+        mask: *mut ggml_tensor,
+    ) -> *mut ggml_tensor;
+}
+extern "C" {
+    pub fn ggml_dsv4_hc_comb(
+        ctx: *mut ggml_context,
+        mixes: *mut ggml_tensor,
+        scale: *mut ggml_tensor,
+        base: *mut ggml_tensor,
+        eps: f32,
+        n_iter: i32,
+    ) -> *mut ggml_tensor;
+}
+extern "C" {
+    pub fn ggml_dsv4_hc_pre(
+        ctx: *mut ggml_context,
+        x: *mut ggml_tensor,
+        weights: *mut ggml_tensor,
+    ) -> *mut ggml_tensor;
+}
+extern "C" {
+    pub fn ggml_dsv4_hc_post(
+        ctx: *mut ggml_context,
+        x: *mut ggml_tensor,
+        residual: *mut ggml_tensor,
+        post: *mut ggml_tensor,
+        comb: *mut ggml_tensor,
+    ) -> *mut ggml_tensor;
+}
 pub type ggml_custom1_op_t = ::std::option::Option<
     unsafe extern "C" fn(
         dst: *mut ggml_tensor,
@@ -2952,6 +3042,14 @@ extern "C" {
     ) -> *mut ggml_tensor;
 }
 extern "C" {
+    pub fn ggml_build_forward_select(
+        cgraph: *mut ggml_cgraph,
+        tensors: *mut *mut ggml_tensor,
+        n_tensors: ::std::os::raw::c_int,
+        idx: ::std::os::raw::c_int,
+    ) -> *mut ggml_tensor;
+}
+extern "C" {
     pub fn ggml_build_forward_expand(cgraph: *mut ggml_cgraph, tensor: *mut ggml_tensor);
 }
 extern "C" {
@@ -3032,7 +3130,7 @@ extern "C" {
 extern "C" {
     pub fn ggml_graph_dump_dot(
         gb: *const ggml_cgraph,
-        gf: *const ggml_cgraph,
+        cgraph: *const ggml_cgraph,
         filename: *const ::std::os::raw::c_char,
     );
 }
@@ -3555,7 +3653,7 @@ extern "C" {
     pub fn ggml_backend_buffer_reset(buffer: ggml_backend_buffer_t);
 }
 extern "C" {
-    pub fn ggml_backend_tensor_copy(src: *mut ggml_tensor, dst: *mut ggml_tensor);
+    pub fn ggml_backend_tensor_copy(src: *const ggml_tensor, dst: *mut ggml_tensor);
 }
 extern "C" {
     pub fn ggml_backend_guid(backend: ggml_backend_t) -> ggml_guid_t;
@@ -3600,6 +3698,30 @@ extern "C" {
     );
 }
 extern "C" {
+    pub fn ggml_backend_tensor_set_2d_async(
+        backend: ggml_backend_t,
+        tensor: *mut ggml_tensor,
+        data: *const ::std::os::raw::c_void,
+        offset: usize,
+        size: usize,
+        n_copies: usize,
+        stride_tensor: usize,
+        stride_data: usize,
+    );
+}
+extern "C" {
+    pub fn ggml_backend_tensor_get_2d_async(
+        backend: ggml_backend_t,
+        tensor: *const ggml_tensor,
+        data: *mut ::std::os::raw::c_void,
+        offset: usize,
+        size: usize,
+        n_copies: usize,
+        stride_tensor: usize,
+        stride_data: usize,
+    );
+}
+extern "C" {
     pub fn ggml_backend_tensor_set(
         tensor: *mut ggml_tensor,
         data: *const ::std::os::raw::c_void,
@@ -3613,6 +3735,28 @@ extern "C" {
         data: *mut ::std::os::raw::c_void,
         offset: usize,
         size: usize,
+    );
+}
+extern "C" {
+    pub fn ggml_backend_tensor_set_2d(
+        tensor: *mut ggml_tensor,
+        data: *const ::std::os::raw::c_void,
+        offset: usize,
+        size: usize,
+        n_copies: usize,
+        stride_tensor: usize,
+        stride_data: usize,
+    );
+}
+extern "C" {
+    pub fn ggml_backend_tensor_get_2d(
+        tensor: *const ggml_tensor,
+        data: *mut ::std::os::raw::c_void,
+        offset: usize,
+        size: usize,
+        n_copies: usize,
+        stride_tensor: usize,
+        stride_data: usize,
     );
 }
 extern "C" {
@@ -3669,7 +3813,7 @@ extern "C" {
     pub fn ggml_backend_tensor_copy_async(
         backend_src: ggml_backend_t,
         backend_dst: ggml_backend_t,
-        src: *mut ggml_tensor,
+        src: *const ggml_tensor,
         dst: *mut ggml_tensor,
     );
 }
@@ -3695,6 +3839,7 @@ pub const ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_CPU: ggml_backend_dev_t
 pub const ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_GPU: ggml_backend_dev_type = 1;
 pub const ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_IGPU: ggml_backend_dev_type = 2;
 pub const ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_ACCEL: ggml_backend_dev_type = 3;
+pub const ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_META: ggml_backend_dev_type = 4;
 pub type ggml_backend_dev_type = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -3930,6 +4075,20 @@ extern "C" {
         name: *const ::std::os::raw::c_char,
     ) -> *mut ::std::os::raw::c_void;
 }
+pub type ggml_backend_comm_init_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        backends: *mut ggml_backend_t,
+        n_backends: usize,
+    ) -> *mut ::std::os::raw::c_void,
+>;
+pub type ggml_backend_comm_free_t =
+    ::std::option::Option<unsafe extern "C" fn(comm_ctx: *mut ::std::os::raw::c_void)>;
+pub type ggml_backend_comm_allreduce_tensor_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        comm_ctx: *mut ::std::os::raw::c_void,
+        tensors: *mut *mut ggml_tensor,
+    ) -> bool,
+>;
 pub type ggml_backend_split_buffer_type_t = ::std::option::Option<
     unsafe extern "C" fn(
         main_device: ::std::os::raw::c_int,
@@ -4160,6 +4319,102 @@ extern "C" {
         user_data: *mut ::std::os::raw::c_void,
     );
 }
+pub const ggml_backend_meta_split_axis_GGML_BACKEND_SPLIT_AXIS_0: ggml_backend_meta_split_axis = 0;
+pub const ggml_backend_meta_split_axis_GGML_BACKEND_SPLIT_AXIS_1: ggml_backend_meta_split_axis = 1;
+pub const ggml_backend_meta_split_axis_GGML_BACKEND_SPLIT_AXIS_2: ggml_backend_meta_split_axis = 2;
+pub const ggml_backend_meta_split_axis_GGML_BACKEND_SPLIT_AXIS_3: ggml_backend_meta_split_axis = 3;
+pub const ggml_backend_meta_split_axis_GGML_BACKEND_SPLIT_AXIS_MIRRORED:
+    ggml_backend_meta_split_axis = 10;
+pub const ggml_backend_meta_split_axis_GGML_BACKEND_SPLIT_AXIS_PARTIAL:
+    ggml_backend_meta_split_axis = 11;
+pub const ggml_backend_meta_split_axis_GGML_BACKEND_SPLIT_AXIS_NONE: ggml_backend_meta_split_axis =
+    98;
+pub const ggml_backend_meta_split_axis_GGML_BACKEND_SPLIT_AXIS_UNKNOWN:
+    ggml_backend_meta_split_axis = 99;
+pub type ggml_backend_meta_split_axis = ::std::os::raw::c_uint;
+extern "C" {
+    pub fn ggml_backend_meta_split_axis_name(
+        split_axis: ggml_backend_meta_split_axis,
+    ) -> *const ::std::os::raw::c_char;
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ggml_backend_meta_split_state {
+    pub axis: ggml_backend_meta_split_axis,
+    pub ne: [i64; 256usize],
+    pub nr: [u32; 16usize],
+    pub n_segments: u32,
+}
+#[test]
+fn bindgen_test_layout_ggml_backend_meta_split_state() {
+    const UNINIT: ::std::mem::MaybeUninit<ggml_backend_meta_split_state> =
+        ::std::mem::MaybeUninit::uninit();
+    let ptr = UNINIT.as_ptr();
+    assert_eq!(
+        ::std::mem::size_of::<ggml_backend_meta_split_state>(),
+        2128usize,
+        concat!("Size of: ", stringify!(ggml_backend_meta_split_state))
+    );
+    assert_eq!(
+        ::std::mem::align_of::<ggml_backend_meta_split_state>(),
+        8usize,
+        concat!("Alignment of ", stringify!(ggml_backend_meta_split_state))
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).axis) as usize - ptr as usize },
+        0usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(ggml_backend_meta_split_state),
+            "::",
+            stringify!(axis)
+        )
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).ne) as usize - ptr as usize },
+        8usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(ggml_backend_meta_split_state),
+            "::",
+            stringify!(ne)
+        )
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).nr) as usize - ptr as usize },
+        2056usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(ggml_backend_meta_split_state),
+            "::",
+            stringify!(nr)
+        )
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).n_segments) as usize - ptr as usize },
+        2120usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(ggml_backend_meta_split_state),
+            "::",
+            stringify!(n_segments)
+        )
+    );
+}
+pub type ggml_backend_meta_get_split_state_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        tensor: *const ggml_tensor,
+        userdata: *mut ::std::os::raw::c_void,
+    ) -> ggml_backend_meta_split_state,
+>;
+extern "C" {
+    pub fn ggml_backend_meta_device(
+        devs: *mut ggml_backend_dev_t,
+        n_devs: usize,
+        get_split_state: ggml_backend_meta_get_split_state_t,
+        get_split_state_ud: *mut ::std::os::raw::c_void,
+    ) -> ggml_backend_dev_t;
+}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct ggml_backend_graph_copy {
@@ -4280,6 +4535,7 @@ pub struct ggml_cplan {
     pub threadpool: *mut ggml_threadpool,
     pub abort_callback: ggml_abort_callback,
     pub abort_callback_data: *mut ::std::os::raw::c_void,
+    pub use_ref: bool,
 }
 #[test]
 fn bindgen_test_layout_ggml_cplan() {
@@ -4287,7 +4543,7 @@ fn bindgen_test_layout_ggml_cplan() {
     let ptr = UNINIT.as_ptr();
     assert_eq!(
         ::std::mem::size_of::<ggml_cplan>(),
-        48usize,
+        56usize,
         concat!("Size of: ", stringify!(ggml_cplan))
     );
     assert_eq!(
@@ -4353,6 +4609,16 @@ fn bindgen_test_layout_ggml_cplan() {
             stringify!(ggml_cplan),
             "::",
             stringify!(abort_callback_data)
+        )
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).use_ref) as usize - ptr as usize },
+        48usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(ggml_cplan),
+            "::",
+            stringify!(use_ref)
         )
     );
 }
@@ -4528,6 +4794,9 @@ extern "C" {
     pub fn ggml_cpu_has_sme() -> ::std::os::raw::c_int;
 }
 extern "C" {
+    pub fn ggml_cpu_has_sme2() -> ::std::os::raw::c_int;
+}
+extern "C" {
     pub fn ggml_cpu_has_riscv_v() -> ::std::os::raw::c_int;
 }
 extern "C" {
@@ -4650,6 +4919,9 @@ extern "C" {
         abort_callback: ggml_abort_callback,
         abort_callback_data: *mut ::std::os::raw::c_void,
     );
+}
+extern "C" {
+    pub fn ggml_backend_cpu_set_use_ref(backend_cpu: ggml_backend_t, use_ref: bool);
 }
 extern "C" {
     pub fn ggml_backend_cpu_reg() -> ggml_backend_reg_t;
@@ -5197,6 +5469,11 @@ extern "C" {
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct gguf_context {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct llama_vocab {
     _unused: [u8; 0],
 }
@@ -5287,8 +5564,14 @@ pub const llama_ftype_LLAMA_FTYPE_MOSTLY_BF16: llama_ftype = 32;
 pub const llama_ftype_LLAMA_FTYPE_MOSTLY_TQ1_0: llama_ftype = 36;
 pub const llama_ftype_LLAMA_FTYPE_MOSTLY_TQ2_0: llama_ftype = 37;
 pub const llama_ftype_LLAMA_FTYPE_MOSTLY_MXFP4_MOE: llama_ftype = 38;
+pub const llama_ftype_LLAMA_FTYPE_MOSTLY_NVFP4: llama_ftype = 39;
+pub const llama_ftype_LLAMA_FTYPE_MOSTLY_Q1_0: llama_ftype = 40;
+pub const llama_ftype_LLAMA_FTYPE_MOSTLY_Q2_0: llama_ftype = 41;
 pub const llama_ftype_LLAMA_FTYPE_GUESSED: llama_ftype = 1024;
 pub type llama_ftype = ::std::os::raw::c_uint;
+extern "C" {
+    pub fn llama_ftype_name(ftype: llama_ftype) -> *const ::std::os::raw::c_char;
+}
 pub const llama_rope_scaling_type_LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED: llama_rope_scaling_type = -1;
 pub const llama_rope_scaling_type_LLAMA_ROPE_SCALING_TYPE_NONE: llama_rope_scaling_type = 0;
 pub const llama_rope_scaling_type_LLAMA_ROPE_SCALING_TYPE_LINEAR: llama_rope_scaling_type = 1;
@@ -5319,7 +5602,11 @@ extern "C" {
 pub const llama_split_mode_LLAMA_SPLIT_MODE_NONE: llama_split_mode = 0;
 pub const llama_split_mode_LLAMA_SPLIT_MODE_LAYER: llama_split_mode = 1;
 pub const llama_split_mode_LLAMA_SPLIT_MODE_ROW: llama_split_mode = 2;
+pub const llama_split_mode_LLAMA_SPLIT_MODE_TENSOR: llama_split_mode = 3;
 pub type llama_split_mode = ::std::os::raw::c_uint;
+pub const llama_context_type_LLAMA_CONTEXT_TYPE_DEFAULT: llama_context_type = 0;
+pub const llama_context_type_LLAMA_CONTEXT_TYPE_MTP: llama_context_type = 1;
+pub type llama_context_type = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct llama_token_data {
@@ -5974,8 +6261,11 @@ pub struct llama_context_params {
     pub n_batch: u32,
     pub n_ubatch: u32,
     pub n_seq_max: u32,
+    pub n_rs_seq: u32,
+    pub n_outputs_max: u32,
     pub n_threads: i32,
     pub n_threads_batch: i32,
+    pub ctx_type: llama_context_type,
     pub rope_scaling_type: llama_rope_scaling_type,
     pub pooling_type: llama_pooling_type,
     pub attention_type: llama_attention_type,
@@ -6002,6 +6292,7 @@ pub struct llama_context_params {
     pub kv_unified: bool,
     pub samplers: *mut llama_sampler_seq_config,
     pub n_samplers: usize,
+    pub ctx_other: *mut llama_context,
 }
 #[test]
 fn bindgen_test_layout_llama_context_params() {
@@ -6009,7 +6300,7 @@ fn bindgen_test_layout_llama_context_params() {
     let ptr = UNINIT.as_ptr();
     assert_eq!(
         ::std::mem::size_of::<llama_context_params>(),
-        136usize,
+        160usize,
         concat!("Size of: ", stringify!(llama_context_params))
     );
     assert_eq!(
@@ -6058,8 +6349,28 @@ fn bindgen_test_layout_llama_context_params() {
         )
     );
     assert_eq!(
-        unsafe { ::std::ptr::addr_of!((*ptr).n_threads) as usize - ptr as usize },
+        unsafe { ::std::ptr::addr_of!((*ptr).n_rs_seq) as usize - ptr as usize },
         16usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(llama_context_params),
+            "::",
+            stringify!(n_rs_seq)
+        )
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).n_outputs_max) as usize - ptr as usize },
+        20usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(llama_context_params),
+            "::",
+            stringify!(n_outputs_max)
+        )
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).n_threads) as usize - ptr as usize },
+        24usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6069,7 +6380,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).n_threads_batch) as usize - ptr as usize },
-        20usize,
+        28usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6078,8 +6389,18 @@ fn bindgen_test_layout_llama_context_params() {
         )
     );
     assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).ctx_type) as usize - ptr as usize },
+        32usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(llama_context_params),
+            "::",
+            stringify!(ctx_type)
+        )
+    );
+    assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).rope_scaling_type) as usize - ptr as usize },
-        24usize,
+        36usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6089,7 +6410,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).pooling_type) as usize - ptr as usize },
-        28usize,
+        40usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6099,7 +6420,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).attention_type) as usize - ptr as usize },
-        32usize,
+        44usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6109,7 +6430,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).flash_attn_type) as usize - ptr as usize },
-        36usize,
+        48usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6119,7 +6440,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).rope_freq_base) as usize - ptr as usize },
-        40usize,
+        52usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6129,7 +6450,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).rope_freq_scale) as usize - ptr as usize },
-        44usize,
+        56usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6139,7 +6460,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).yarn_ext_factor) as usize - ptr as usize },
-        48usize,
+        60usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6149,7 +6470,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).yarn_attn_factor) as usize - ptr as usize },
-        52usize,
+        64usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6159,7 +6480,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).yarn_beta_fast) as usize - ptr as usize },
-        56usize,
+        68usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6169,7 +6490,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).yarn_beta_slow) as usize - ptr as usize },
-        60usize,
+        72usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6179,7 +6500,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).yarn_orig_ctx) as usize - ptr as usize },
-        64usize,
+        76usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6189,7 +6510,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).defrag_thold) as usize - ptr as usize },
-        68usize,
+        80usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6199,7 +6520,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).cb_eval) as usize - ptr as usize },
-        72usize,
+        88usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6209,7 +6530,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).cb_eval_user_data) as usize - ptr as usize },
-        80usize,
+        96usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6219,7 +6540,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).type_k) as usize - ptr as usize },
-        88usize,
+        104usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6229,7 +6550,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).type_v) as usize - ptr as usize },
-        92usize,
+        108usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6239,7 +6560,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).abort_callback) as usize - ptr as usize },
-        96usize,
+        112usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6249,7 +6570,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).abort_callback_data) as usize - ptr as usize },
-        104usize,
+        120usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6259,7 +6580,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).embeddings) as usize - ptr as usize },
-        112usize,
+        128usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6269,7 +6590,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).offload_kqv) as usize - ptr as usize },
-        113usize,
+        129usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6279,7 +6600,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).no_perf) as usize - ptr as usize },
-        114usize,
+        130usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6289,7 +6610,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).op_offload) as usize - ptr as usize },
-        115usize,
+        131usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6299,7 +6620,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).swa_full) as usize - ptr as usize },
-        116usize,
+        132usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6309,7 +6630,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).kv_unified) as usize - ptr as usize },
-        117usize,
+        133usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6319,7 +6640,7 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).samplers) as usize - ptr as usize },
-        120usize,
+        136usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
@@ -6329,12 +6650,117 @@ fn bindgen_test_layout_llama_context_params() {
     );
     assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).n_samplers) as usize - ptr as usize },
-        128usize,
+        144usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_context_params),
             "::",
             stringify!(n_samplers)
+        )
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).ctx_other) as usize - ptr as usize },
+        152usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(llama_context_params),
+            "::",
+            stringify!(ctx_other)
+        )
+    );
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct llama_model_tensor_override {
+    pub pattern: *const ::std::os::raw::c_char,
+    pub type_: ggml_type,
+}
+#[test]
+fn bindgen_test_layout_llama_model_tensor_override() {
+    const UNINIT: ::std::mem::MaybeUninit<llama_model_tensor_override> =
+        ::std::mem::MaybeUninit::uninit();
+    let ptr = UNINIT.as_ptr();
+    assert_eq!(
+        ::std::mem::size_of::<llama_model_tensor_override>(),
+        16usize,
+        concat!("Size of: ", stringify!(llama_model_tensor_override))
+    );
+    assert_eq!(
+        ::std::mem::align_of::<llama_model_tensor_override>(),
+        8usize,
+        concat!("Alignment of ", stringify!(llama_model_tensor_override))
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).pattern) as usize - ptr as usize },
+        0usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(llama_model_tensor_override),
+            "::",
+            stringify!(pattern)
+        )
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).type_) as usize - ptr as usize },
+        8usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(llama_model_tensor_override),
+            "::",
+            stringify!(type_)
+        )
+    );
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct llama_model_imatrix_data {
+    pub name: *const ::std::os::raw::c_char,
+    pub data: *const f32,
+    pub size: usize,
+}
+#[test]
+fn bindgen_test_layout_llama_model_imatrix_data() {
+    const UNINIT: ::std::mem::MaybeUninit<llama_model_imatrix_data> =
+        ::std::mem::MaybeUninit::uninit();
+    let ptr = UNINIT.as_ptr();
+    assert_eq!(
+        ::std::mem::size_of::<llama_model_imatrix_data>(),
+        24usize,
+        concat!("Size of: ", stringify!(llama_model_imatrix_data))
+    );
+    assert_eq!(
+        ::std::mem::align_of::<llama_model_imatrix_data>(),
+        8usize,
+        concat!("Alignment of ", stringify!(llama_model_imatrix_data))
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).name) as usize - ptr as usize },
+        0usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(llama_model_imatrix_data),
+            "::",
+            stringify!(name)
+        )
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).data) as usize - ptr as usize },
+        8usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(llama_model_imatrix_data),
+            "::",
+            stringify!(data)
+        )
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).size) as usize - ptr as usize },
+        16usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(llama_model_imatrix_data),
+            "::",
+            stringify!(size)
         )
     );
 }
@@ -6350,10 +6776,11 @@ pub struct llama_model_quantize_params {
     pub only_copy: bool,
     pub pure_: bool,
     pub keep_split: bool,
-    pub imatrix: *mut ::std::os::raw::c_void,
-    pub kv_overrides: *mut ::std::os::raw::c_void,
-    pub tensor_types: *mut ::std::os::raw::c_void,
-    pub prune_layers: *mut ::std::os::raw::c_void,
+    pub dry_run: bool,
+    pub imatrix: *const llama_model_imatrix_data,
+    pub kv_overrides: *const llama_model_kv_override,
+    pub tt_overrides: *const llama_model_tensor_override,
+    pub prune_layers: *const i32,
 }
 #[test]
 fn bindgen_test_layout_llama_model_quantize_params() {
@@ -6461,6 +6888,16 @@ fn bindgen_test_layout_llama_model_quantize_params() {
         )
     );
     assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).dry_run) as usize - ptr as usize },
+        21usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(llama_model_quantize_params),
+            "::",
+            stringify!(dry_run)
+        )
+    );
+    assert_eq!(
         unsafe { ::std::ptr::addr_of!((*ptr).imatrix) as usize - ptr as usize },
         24usize,
         concat!(
@@ -6481,13 +6918,13 @@ fn bindgen_test_layout_llama_model_quantize_params() {
         )
     );
     assert_eq!(
-        unsafe { ::std::ptr::addr_of!((*ptr).tensor_types) as usize - ptr as usize },
+        unsafe { ::std::ptr::addr_of!((*ptr).tt_overrides) as usize - ptr as usize },
         40usize,
         concat!(
             "Offset of field: ",
             stringify!(llama_model_quantize_params),
             "::",
-            stringify!(tensor_types)
+            stringify!(tt_overrides)
         )
     );
     assert_eq!(
@@ -6650,6 +7087,17 @@ extern "C" {
 extern "C" {
     pub fn llama_detach_threadpool(ctx: *mut llama_context);
 }
+pub type llama_model_set_tensor_data_t = ::std::option::Option<
+    unsafe extern "C" fn(tensor: *mut ggml_tensor, userdata: *mut ::std::os::raw::c_void),
+>;
+extern "C" {
+    pub fn llama_model_init_from_user(
+        metadata: *mut gguf_context,
+        set_tensor_data: llama_model_set_tensor_data_t,
+        set_tensor_data_ud: *mut ::std::os::raw::c_void,
+        params: llama_model_params,
+    ) -> *mut llama_model;
+}
 extern "C" {
     pub fn llama_load_model_from_file(
         path_model: *const ::std::os::raw::c_char,
@@ -6659,6 +7107,12 @@ extern "C" {
 extern "C" {
     pub fn llama_model_load_from_file(
         path_model: *const ::std::os::raw::c_char,
+        params: llama_model_params,
+    ) -> *mut llama_model;
+}
+extern "C" {
+    pub fn llama_model_load_from_file_ptr(
+        file: *mut FILE,
         params: llama_model_params,
     ) -> *mut llama_model;
 }
@@ -6695,22 +7149,6 @@ extern "C" {
 }
 extern "C" {
     pub fn llama_free(ctx: *mut llama_context);
-}
-pub const llama_params_fit_status_LLAMA_PARAMS_FIT_STATUS_SUCCESS: llama_params_fit_status = 0;
-pub const llama_params_fit_status_LLAMA_PARAMS_FIT_STATUS_FAILURE: llama_params_fit_status = 1;
-pub const llama_params_fit_status_LLAMA_PARAMS_FIT_STATUS_ERROR: llama_params_fit_status = 2;
-pub type llama_params_fit_status = ::std::os::raw::c_uint;
-extern "C" {
-    pub fn llama_params_fit(
-        path_model: *const ::std::os::raw::c_char,
-        mparams: *mut llama_model_params,
-        cparams: *mut llama_context_params,
-        tensor_split: *mut f32,
-        tensor_buft_overrides: *mut llama_model_tensor_buft_override,
-        margins: *mut usize,
-        n_ctx_min: u32,
-        log_level: ggml_log_level,
-    ) -> llama_params_fit_status;
 }
 extern "C" {
     pub fn llama_time_us() -> i64;
@@ -6750,6 +7188,9 @@ extern "C" {
 }
 extern "C" {
     pub fn llama_n_seq_max(ctx: *const llama_context) -> u32;
+}
+extern "C" {
+    pub fn llama_n_rs_seq(ctx: *const llama_context) -> u32;
 }
 extern "C" {
     pub fn llama_n_ctx_train(model: *const llama_model) -> i32;
@@ -6795,6 +7236,9 @@ extern "C" {
 }
 extern "C" {
     pub fn llama_model_n_layer(model: *const llama_model) -> i32;
+}
+extern "C" {
+    pub fn llama_model_n_layer_nextn(model: *const llama_model) -> i32;
 }
 extern "C" {
     pub fn llama_model_n_head(model: *const llama_model) -> i32;
@@ -6859,6 +7303,9 @@ extern "C" {
         buf: *mut ::std::os::raw::c_char,
         buf_size: usize,
     ) -> i32;
+}
+extern "C" {
+    pub fn llama_model_ftype(model: *const llama_model) -> llama_ftype;
 }
 extern "C" {
     pub fn llama_model_size(model: *const llama_model) -> u64;
@@ -6942,20 +7389,15 @@ extern "C" {
     ) -> *const llama_token;
 }
 extern "C" {
-    pub fn llama_set_adapter_lora(
+    pub fn llama_set_adapters_lora(
         ctx: *mut llama_context,
-        adapter: *mut llama_adapter_lora,
-        scale: f32,
+        adapters: *mut *mut llama_adapter_lora,
+        n_adapters: usize,
+        scales: *mut f32,
     ) -> i32;
 }
 extern "C" {
-    pub fn llama_rm_adapter_lora(ctx: *mut llama_context, adapter: *mut llama_adapter_lora) -> i32;
-}
-extern "C" {
-    pub fn llama_clear_adapter_lora(ctx: *mut llama_context);
-}
-extern "C" {
-    pub fn llama_apply_adapter_cvec(
+    pub fn llama_set_adapter_cvec(
         ctx: *mut llama_context,
         data: *const f32,
         len: usize,
@@ -7376,7 +7818,7 @@ extern "C" {
     ) -> i32;
 }
 extern "C" {
-    #[doc = " Apply chat template. Inspired by hf apply_chat_template() on python.\n Both \"model\" and \"custom_template\" are optional, but at least one is required. \"custom_template\" has higher precedence than \"model\"\n NOTE: This function does not use a jinja parser. It only support a pre-defined list of template. See more: https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template\n @param tmpl A Jinja template to use for this chat. If this is nullptr, the model’s default chat template will be used instead.\n @param chat Pointer to a list of multiple llama_chat_message\n @param n_msg Number of llama_chat_message in this chat\n @param add_ass Whether to end the prompt with the token(s) that indicate the start of an assistant message.\n @param buf A buffer to hold the output formatted prompt. The recommended alloc size is 2 * (total number of characters of all messages)\n @param length The size of the allocated buffer\n @return The total number of bytes of the formatted prompt. If is it larger than the size of buffer, you may need to re-alloc it and then re-apply the template."]
+    #[doc = " Apply chat template. Inspired by hf apply_chat_template() on python.\n\n NOTE: This function does not use a jinja parser. It only support a pre-defined list of template. See more: https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template\n @param tmpl A Jinja template to use for this chat.\n @param chat Pointer to a list of multiple llama_chat_message\n @param n_msg Number of llama_chat_message in this chat\n @param add_ass Whether to end the prompt with the token(s) that indicate the start of an assistant message.\n @param buf A buffer to hold the output formatted prompt. The recommended alloc size is 2 * (total number of characters of all messages)\n @param length The size of the allocated buffer\n @return The total number of bytes of the formatted prompt. If is it larger than the size of buffer, you may need to re-alloc it and then re-apply the template."]
     pub fn llama_chat_apply_template(
         tmpl: *const ::std::os::raw::c_char,
         chat: *const llama_chat_message,
@@ -7750,7 +8192,7 @@ extern "C" {
     pub fn llama_sampler_init_mirostat_v2(seed: u32, tau: f32, eta: f32) -> *mut llama_sampler;
 }
 extern "C" {
-    #[doc = " @details Intializes a GBNF grammar, see grammars/README.md for details.\n @param vocab The vocabulary that this grammar will be used with.\n @param grammar_str The production rules for the grammar, encoded as a string. Returns an empty grammar if empty. Returns NULL if parsing of grammar_str fails.\n @param grammar_root The name of the start symbol for the grammar."]
+    #[doc = " @details Initializes a GBNF grammar, see grammars/README.md for details.\n @param vocab The vocabulary that this grammar will be used with.\n @param grammar_str The production rules for the grammar, encoded as a string. Returns an empty grammar if empty. Returns NULL if parsing of grammar_str fails.\n @param grammar_root The name of the start symbol for the grammar."]
     pub fn llama_sampler_init_grammar(
         vocab: *const llama_vocab,
         grammar_str: *const ::std::os::raw::c_char,
@@ -7832,9 +8274,9 @@ extern "C" {
         split_path: *mut ::std::os::raw::c_char,
         maxlen: usize,
         path_prefix: *const ::std::os::raw::c_char,
-        split_no: ::std::os::raw::c_int,
-        split_count: ::std::os::raw::c_int,
-    ) -> ::std::os::raw::c_int;
+        split_no: i32,
+        split_count: i32,
+    ) -> i32;
 }
 extern "C" {
     #[doc = " @details Extract the path prefix from the split_path if and only if the split_no and split_count match.\n          llama_split_prefix(split_prefix, 64, \"/models/ggml-model-q4_0-00002-of-00004.gguf\", 2, 4) => split_prefix = \"/models/ggml-model-q4_0\""]
@@ -7842,9 +8284,9 @@ extern "C" {
         split_prefix: *mut ::std::os::raw::c_char,
         maxlen: usize,
         split_path: *const ::std::os::raw::c_char,
-        split_no: ::std::os::raw::c_int,
-        split_count: ::std::os::raw::c_int,
-    ) -> ::std::os::raw::c_int;
+        split_no: i32,
+        split_count: i32,
+    ) -> i32;
 }
 extern "C" {
     pub fn llama_print_system_info() -> *const ::std::os::raw::c_char;
@@ -8014,9 +8456,6 @@ extern "C" {
 }
 extern "C" {
     pub fn llama_perf_sampler_reset(chain: *mut llama_sampler);
-}
-extern "C" {
-    pub fn llama_memory_breakdown_print(ctx: *const llama_context);
 }
 pub type llama_opt_param_filter = ::std::option::Option<
     unsafe extern "C" fn(tensor: *const ggml_tensor, userdata: *mut ::std::os::raw::c_void) -> bool,

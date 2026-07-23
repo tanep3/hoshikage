@@ -1,6 +1,12 @@
 use crate::error::Result;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeBackendKind {
+    LlamaServerManaged,
+    LlamaFfi,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub port: u16,
@@ -18,6 +24,12 @@ pub struct Config {
     pub repeat_last_n: u32,
     pub model_dir: Option<PathBuf>,
     pub model_map_file: Option<PathBuf>,
+    pub runtime_backend: RuntimeBackendKind,
+    pub llama_cpp_runtime_dir: Option<PathBuf>,
+    pub llama_server_host: String,
+    pub llama_server_port: u16,
+    pub llama_server_startup_timeout_secs: u64,
+    pub llama_server_sleep_idle_secs: Option<u64>,
     pub lib_path: Option<String>,
     // Diffusion parameters
     pub diffusion_steps: i32,
@@ -45,6 +57,12 @@ impl Default for Config {
             repeat_last_n: 64,
             model_dir: None,
             model_map_file: None,
+            runtime_backend: RuntimeBackendKind::LlamaServerManaged,
+            llama_cpp_runtime_dir: None,
+            llama_server_host: "127.0.0.1".to_string(),
+            llama_server_port: 13030,
+            llama_server_startup_timeout_secs: 120,
+            llama_server_sleep_idle_secs: None,
             lib_path: None,
             // Diffusion defaults
             diffusion_steps: 50,
@@ -139,6 +157,33 @@ impl Config {
             config.model_map_file = Some(PathBuf::from(model_map_file));
         }
 
+        if let Ok(runtime_backend) = std::env::var("HOSHIKAGE_RUNTIME_BACKEND") {
+            config.runtime_backend = RuntimeBackendKind::parse(&runtime_backend)?;
+        }
+
+        if let Ok(runtime_dir) = std::env::var("HOSHIKAGE_LLAMA_CPP_RUNTIME_DIR") {
+            config.llama_cpp_runtime_dir = Some(PathBuf::from(runtime_dir));
+        }
+
+        if let Ok(host) = std::env::var("HOSHIKAGE_LLAMA_SERVER_HOST") {
+            config.llama_server_host = host;
+        }
+
+        if let Ok(port) = std::env::var("HOSHIKAGE_LLAMA_SERVER_PORT") {
+            config.llama_server_port = port.parse().unwrap_or(13030);
+        }
+
+        if let Ok(timeout) = std::env::var("HOSHIKAGE_LLAMA_SERVER_STARTUP_TIMEOUT_SECS") {
+            config.llama_server_startup_timeout_secs = timeout.parse().unwrap_or(120);
+        }
+
+        if let Ok(sleep_idle) = std::env::var("HOSHIKAGE_LLAMA_SERVER_SLEEP_IDLE_SECS") {
+            config.llama_server_sleep_idle_secs = match sleep_idle.as_str() {
+                "" | "off" | "disabled" => None,
+                value => Some(value.parse().unwrap_or(2)),
+            };
+        }
+
         if let Ok(lib_path) = std::env::var("HOSHIKAGE_LIB_PATH") {
             config.lib_path = Some(lib_path);
         }
@@ -181,6 +226,18 @@ impl Config {
         }
     }
 
+    pub fn llama_cpp_runtime_dir(&self) -> Result<PathBuf> {
+        if let Some(path) = &self.llama_cpp_runtime_dir {
+            return Ok(path.clone());
+        }
+
+        let config_dir = dirs::config_dir().ok_or_else(|| {
+            crate::error::HoshikageError::ConfigError("Config directory not found".to_string())
+        })?;
+
+        Ok(config_dir.join("hoshikage").join("llama.cpp"))
+    }
+
     pub fn resolve_lib_path(&self) -> Result<PathBuf> {
         let lib_name = if cfg!(target_os = "windows") {
             "llama.dll"
@@ -206,5 +263,18 @@ impl Config {
         }
 
         Ok(PathBuf::from(lib_name))
+    }
+}
+
+impl RuntimeBackendKind {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "llama-server-managed" | "managed" | "server" => Ok(Self::LlamaServerManaged),
+            "llama-ffi" | "ffi" => Ok(Self::LlamaFfi),
+            other => Err(crate::error::HoshikageError::ConfigError(format!(
+                "unsupported HOSHIKAGE_RUNTIME_BACKEND: {}",
+                other
+            ))),
+        }
     }
 }

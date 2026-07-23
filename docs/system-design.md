@@ -241,11 +241,11 @@ Linux標準の共有メモリ領域 `/dev/shm` (tmpfs) を活用します。こ�
 ## 5. パフォーマンス・運用最適化
 
 ### 5.1 動的リンク (Dynamic Linking)
-- **柔軟性**: ユーザーがシステムのCUDAバージョンに合わせて `libllama.so` を差し替え可能。
-- **配置**: `~/.config/hoshikage/lib/` (Linux) または `%APPDATA%\hoshikage\lib` (Windows)。
+- **柔軟性**: ユーザーが自分のOS/GPUに合わせた llama.cpp runtime を導入できます。
+- **配置**: `~/.config/hoshikage/llama.cpp/` (Linux) または `%APPDATA%\hoshikage\llama.cpp` (Windows)。
 
 ### 5.2 llama.cpp最適化
-- **CUDA加速**: n_gpu_layers=-1でGPUを最大活用
+- **CUDA加速**: `n_gpu_layers=99` など明示値でGPUを最大活用
 - **Flash Attention**: 推論速度の最適化
 - **KV Cache**: コンテキスト管理の効率化
 

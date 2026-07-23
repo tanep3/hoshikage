@@ -1,101 +1,127 @@
-# 星影 (Hoshikage) - ライブラリ運用ガイド
+# 星影 (Hoshikage) - llama.cpp runtime 運用ガイド
 
 **作成日:** 2026-01-18  
+**更新日:** 2026-07-23  
 **プロジェクト:** 星影 (Hoshikage)
 
 ---
 
-## 1. 概要: 動的リンクと運用方針
-星影は **動的ライブラリ (`libllama.so`)** を使用して動作します。
-これにより、ユーザーが自分の環境に合わせてビルドしたライブラリを自由に差し替えたり、バージョンアップしたりすることが可能です。
+## 1. 基本方針
 
-### 探索順序 (優先度順)
-1. **ユーザーライブラリ**: `~/.config/hoshikage/lib/`
-2. **ログ**: 起動時にどのライブラリがロードされたかを表示します。
+Hoshikage は llama.cpp 本体、ビルド済みバイナリ、GPU backend 用 shared library を配布しません。
 
-## 2. ライブラリの配置場所
-ユーザーがライブラリを配置する標準ディレクトリは以下の通りです。ディレクトリが存在しない場合は作成してください。
+利用者は、自分の OS と GPU に合う llama.cpp runtime を公式配布物または source build で用意し、Hoshikage の標準 runtime directory に配置します。
 
-```bash
-mkdir -p ~/.config/hoshikage/lib
+```text
+~/.config/hoshikage/llama.cpp
 ```
 
-### 必要なファイル
-ここに `libllama.so` (または `libllama.so.0` などの実体) を配置します。
+Hoshikage はこの directory にある `llama-server` を managed runtime として起動・監視します。FFI 互換経路を使う場合も、同じ directory の `libllama` などの shared library を参照します。
 
-## 3. セットアップ手順
+初心者向けの OS 別導入手順は [llama.cpp Installation Guide for Hoshikage](llama-cpp-install-guide.md) を参照してください。
 
-### ケースA: 提供されたライブラリを使う場合
-プロジェクトに含まれるビルド済みライブラリをコピーして使用します。
+---
 
-```bash
-# プロジェクトルートで実行
-cp llama_cpp_local/lib/libllama.so.0 ~/.config/hoshikage/lib/
-cp llama_cpp_local/llama-cli ~/.config/hoshikage/lib/
+## 2. 必要なファイル
+
+Linux:
+
+```text
+~/.config/hoshikage/llama.cpp/llama-server
+~/.config/hoshikage/llama.cpp/llama-cli
+~/.config/hoshikage/llama.cpp/libllama.so
+~/.config/hoshikage/llama.cpp/libggml*.so
+~/.config/hoshikage/llama.cpp/libmtmd.so
 ```
 
-### ケースB: 自分でビルドする場合 (上級者向け)
-`llama.cpp` をご自身の環境でビルドし、生成された `libllama.so` を配置してください。
+macOS:
 
-```bash
-# 例: llama.cpp ビルド後
-cp /path/to/llama.cpp/build/src/libllama.so ~/.config/hoshikage/lib/
+```text
+~/Library/Application Support/hoshikage/llama.cpp/llama-server
+~/Library/Application Support/hoshikage/llama.cpp/llama-cli
+~/Library/Application Support/hoshikage/llama.cpp/libllama.dylib
+~/Library/Application Support/hoshikage/llama.cpp/libggml*.dylib
+~/Library/Application Support/hoshikage/llama.cpp/libmtmd.dylib
 ```
 
-## 4. 実行環境のセットアップ
-`hoshikage` コマンドを端末から直接実行できるように、`LD_LIBRARY_PATH` を `.bashrc` (または `.zshrc`) に登録してください。
+Windows:
 
-```bash
-echo 'export LD_LIBRARY_PATH=$HOME/.config/hoshikage/lib:$LD_LIBRARY_PATH' >> ~/.bashrc
-source ~/.bashrc
-```
-
-## 5. インストールと実行
-Cargoを使ってシステムにインストールします。
-
-```bash
-cargo install --path .
-```
-
-これで、ターミナルから直接実行できます。
-
-```bash
-hoshikage
+```text
+%APPDATA%\hoshikage\llama.cpp\llama-server.exe
+%APPDATA%\hoshikage\llama.cpp\llama-cli.exe
+%APPDATA%\hoshikage\llama.cpp\llama.dll
+%APPDATA%\hoshikage\llama.cpp\ggml*.dll
+%APPDATA%\hoshikage\llama.cpp\mtmd.dll
 ```
 
 ---
 
-## 6. Windowsユーザーの方へ
+## 3. 動作確認
 
-Windows環境では、ライブラリの配置場所や環境変数が異なります。
+runtime を配置したら、まず `llama-server` が起動できるか確認します。
 
-### 配置場所 (Windows準拠)
-`%APPDATA%\hoshikage\lib`
-(通常は `C:\Users\ユーザー名\AppData\Roaming\hoshikage\lib`)
+Linux:
 
-### セットアップ手順 (PowerShell)
+```bash
+~/.config/hoshikage/llama.cpp/llama-server --version
+```
 
-1. **ディレクトリ作成**
-   ```powershell
-   mkdir -p "$env:APPDATA\hoshikage\lib"
-   ```
+macOS:
 
-2. **ライブラリ配置**
-   ビルドした `llama.dll` (または `libllama.dll`) を上記フォルダにコピーします。
+```bash
+"$HOME/Library/Application Support/hoshikage/llama.cpp/llama-server" --version
+```
 
-3. **環境変数 (PATH) の設定**
-   コマンド実行時に読み込まれるよう、ユーザー環境変数の `Path` に追加します。
+Windows PowerShell:
 
-   ```powershell
-   # 現在のセッションに追加
-   $env:PATH += ";$env:APPDATA\hoshikage\lib"
+```powershell
+& "$env:APPDATA\hoshikage\llama.cpp\llama-server.exe" --version
+```
 
-   # 永続的に追加 (推奨)
-   [System.Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:APPDATA\hoshikage\lib", [System.EnvironmentVariableTarget]::User)
-   ```
+Hoshikage 側の診断:
 
-4. **インストールと実行**
-   ```powershell
-   cargo install --path .
-   hoshikage
-   ```
+```bash
+hoshikage doctor
+```
+
+モデル登録後の診断:
+
+```bash
+hoshikage doctor --model <model-label>
+```
+
+---
+
+## 4. 探索順序
+
+標準では、Hoshikage は次の runtime directory を使います。
+
+```text
+~/.config/hoshikage/llama.cpp
+```
+
+別の場所に置きたい場合は、環境変数で明示します。
+
+```bash
+HOSHIKAGE_LLAMA_CPP_RUNTIME_DIR=/path/to/llama.cpp-runtime
+```
+
+Linux で loader が shared library を見つけられない場合は、同じ directory を `LD_LIBRARY_PATH` に追加します。
+
+```bash
+export LD_LIBRARY_PATH="$HOME/.config/hoshikage/llama.cpp:$LD_LIBRARY_PATH"
+```
+
+---
+
+## 5. 開発者向けメモ
+
+`llama_cpp_local/` はローカル検証用の作業 directory として使えますが、Git 管理対象にはしません。
+
+Rust の FFI binding は通常、リポジトリに含まれる `src/ffi.rs` を使います。llama.cpp header から binding を再生成したい場合は、header directory を用意してから build します。
+
+```bash
+HOSHIKAGE_LLAMA_CPP_INCLUDE_DIR=/path/to/llama.cpp/include cargo build
+```
+
+`llama.cpp` の更新や CUDA build の具体手順は [llama.cpp Installation Guide for Hoshikage](llama-cpp-install-guide.md) を参照してください。
