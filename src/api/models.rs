@@ -1,4 +1,9 @@
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -40,12 +45,53 @@ pub async fn models(
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<crate::model::RuntimeStatusSnapshot>,
 }
 
-pub async fn status() -> Json<StatusResponse> {
+pub async fn status(
+    State(manager): State<Arc<crate::model::ModelManager>>,
+) -> Json<StatusResponse> {
     Json(StatusResponse {
         status: "ok".to_string(),
+        runtime: Some(manager.runtime_status()),
     })
+}
+
+#[derive(Debug, Serialize)]
+pub struct HoshikageModelListResponse {
+    pub object: String,
+    pub data: Vec<crate::model::HoshikageModelInfo>,
+}
+
+pub async fn hoshikage_models(
+    State(manager): State<Arc<crate::model::ModelManager>>,
+) -> Json<HoshikageModelListResponse> {
+    Json(HoshikageModelListResponse {
+        object: "list".to_string(),
+        data: manager.list_hoshikage_models().await,
+    })
+}
+
+pub async fn hoshikage_model(
+    State(manager): State<Arc<crate::model::ModelManager>>,
+    Path(name): Path<String>,
+) -> Response {
+    match manager.get_hoshikage_model(&name).await {
+        Ok(model) => Json(model).into_response(),
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "model_not_found",
+                    "message": "指定されたモデルが見つかりません",
+                    "type": "invalid_request",
+                    "param": "model"
+                }
+            })),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -80,6 +126,7 @@ mod tests {
     fn test_status_response() {
         let response = StatusResponse {
             status: "ok".to_string(),
+            runtime: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();

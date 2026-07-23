@@ -24,6 +24,10 @@ yarn-error.log*
 /Cargo.lock
 pkg/
 
+# llama.cpp runtime/source is prepared by each user.
+# Keep local builds here if useful, but do not publish them from this repository.
+/llama_cpp_local/
+
 # 共通
 .vscode/
 *.code-workspace
@@ -40,13 +44,6 @@ Thumbs.db
 # プロジェクト固有
 old/
 legacy_python/
-
-# 環境変数（ユーザー固有）
-.env
-
-# 依存関係
-venv/
-target/
 
 # OS固有
 .DS_Store

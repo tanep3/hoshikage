@@ -28,7 +28,7 @@
 **Linuxの場合:**
 ```bash
 # 1. 実行パスの設定（.bashrc推奨）
-echo 'export LD_LIBRARY_PATH=$HOME/.config/hoshikage/lib:$LD_LIBRARY_PATH' >> ~/.bashrc
+echo 'export LD_LIBRARY_PATH=$HOME/.config/hoshikage/llama.cpp:$LD_LIBRARY_PATH' >> ~/.bashrc
 source ~/.bashrc
 
 # 2. Cargo経由でローカルインストール
@@ -48,7 +48,8 @@ cargo install --path .
 ```
 
 これにより、`hoshikage` コマンドがターミナルから直接利用可能になります。
-※ 別途 `libllama.so` (Linux) または `llama.dll` (Windows) を上記設定パスに配置する必要があります（詳細は `docs/LIBRARY_GUIDE.md` 参照）。
+※ 別途 `libllama.so` (Linux) または `llama.dll` (Windows) を上記設定パスに配置する必要があります。
+現行の配置方針は `docs/LIBRARY_GUIDE.md`、最新 llama.cpp の導入手順は `docs/llama-cpp-install-guide.md` を参照してください。
 
 ---
 
@@ -63,12 +64,14 @@ GGUFモデルを `models/` ディレクトリに配置し、`~/.config/hoshikage
 ```json
 {
   "model-alias": {
-    "path": "/path/to/models",
+    "base_path": "/path/to/models",
     "model": "model-file.gguf",
     "stop": ["<|im_end|>", "</s>"]
   }
 }
 ```
+
+既存の `path` field も読み込み互換のため使用できます。新しく保存する設定では `base_path` を使用します。
 
 `stop` はデフォルトのストップシーケンスにマージされ、重複は除去されます。
 デフォルトには `<|im_start|>`, `<|im_end|>`, `</s>`, `<|eot_id|>`, `<|endoftext|>` が含まれます。
@@ -82,12 +85,34 @@ cp /path/to/LFM2.5-1.2B-JP-Q8_0.gguf models/
 cat > ~/.config/hoshikage/model_map.json << 'EOF'
 {
   "LFM2.5_Q8": {
-    "path": "./models",
+    "base_path": "./models",
     "model": "LFM2.5-1.2B-JP-Q8_0.gguf",
     "stop": ["<|im_end|>", "<|eot_id|>", "</s>"]
   }
 }
 EOF
+```
+
+Vision や speculative decoding 用の追加ファイルがあるモデルは、同じ `model_map.json` に bundle 設定として保存できます。
+
+```json
+{
+  "gemma4-local": {
+    "base_path": "/models/gemma4-local",
+    "model": "main.gguf",
+    "mmproj": "mmproj.gguf",
+    "drafter": "mtp.gguf",
+    "speculation": {
+      "mode": "mtp",
+      "fallback": "warn"
+    },
+    "thinking": {
+      "mode": "off"
+    },
+    "n_ctx": 8192,
+    "n_gpu_layers": 99
+  }
+}
 ```
 
 ### 2.2 モデルの管理 (CLI)
@@ -101,7 +126,22 @@ hoshikage add /path/to/LFM.gguf LFM-v2
 
 # ストップワードを指定する場合
 hoshikage add /path/to/LFM.gguf LFM-v2 "</s>" "<|im_end|>"
+
+# Vision 用 projector を登録する場合
+hoshikage add /models/gemma4/main.gguf gemma4-local --mmproj /models/gemma4/mmproj.gguf
+
+# MTP 用 drafter と Thinking off を登録する場合
+hoshikage add /models/gemma4/main.gguf gemma4-local --mtp-drafter /models/gemma4/mtp.gguf --thinking-off
+
+# モデル別 context / GPU offload を登録する場合
+# CUDA で全層GPU offloadを狙う場合は 99 など十分大きい値を指定します。
+hoshikage add /models/gemma4/main.gguf gemma4-local --n-ctx 8192 --n-gpu-layers 99
+
+# 登録前に bundle と runtime の整合性を確認する場合
+hoshikage add /models/gemma4/main.gguf gemma4-local --mmproj /models/gemma4/mmproj.gguf --check
 ```
+
+`--n-ctx` と `--n-gpu-layers` はモデル単位の設定として保存され、該当モデルのロード時にサーバー全体の既定値より優先されます。
 
 #### モデルの削除
 ```bash
@@ -111,10 +151,42 @@ hoshikage rm LFM-v2
 #### モデルの一覧表示
 ```bash
 hoshikage list
+
+# 詳細表示
+hoshikage list --details
+```
+
+#### runtime / bundle 診断
+```bash
+# runtime library と backend の診断
+hoshikage doctor
+
+# 登録済みモデルの bundle 整合性も診断
+hoshikage doctor --model gemma4-local
+
+# JSON で出力
+hoshikage doctor --model gemma4-local --json
 ```
 
 ### 2.3 モデルの切り替え
 リクエストの`model`パラメータで登録したモデルラベル（例: `LFM-v2`）を指定することで、動的に使用するモデルを切り替えられます。
+
+### 2.4 次期 Model Bundle 方針
+
+現行版では、モデルごとの設定は `~/.config/hoshikage/model_map.json` に保存されます。
+`.env` はサーバー全体の既定値を扱い、モデルごとの差分は `model_map.json` 側で管理する方針です。
+
+次期モデルランタイム改訂では、次のようなファイルと設定を Model Bundle としてモデル単位に管理する予定です。
+
+- メイン GGUF モデル
+- Vision projector (`mmproj`)
+- Draft model
+- stop sequence
+- context length
+- GPU offload 設定
+- MTP / Draft model の fallback mode
+
+詳細は `docs/model-runtime-revision-requirements.md` を参照してください。
 
 ---
 
@@ -140,7 +212,8 @@ PORT=3030
 IDLE_TIMEOUT=300
 
 # RAMディスク設定 (高速ロード用)
-# Linuxの場合: /dev/shm (デフォルト) を使用するため設定不要です。sudo権限も不要です。
+# Linuxの場合: /dev/shm などを指定できます。sudo権限も不要です。
+# Model Bundle は RAMDISK_PATH/hoshikage/current に配置されます。
 # Windows / Mac はRAMディスク非対応のため、自動的にSSDからの直接ロードになります。
 RAMDISK_PATH=/dev/shm
 
@@ -153,9 +226,16 @@ GREAT_TIMEOUT=60
 N_CTX=4096
 
 # 生成パラメータ
-# デフォルト: TEMPERATURE=0.2, TOP_P=0.8
+# デフォルト: TEMPERATURE=0.2, TOP_P=0.95
 TEMPERATURE=0.2
-TOP_P=0.8
+TOP_P=0.95
+
+# MTP 有効時の速度を優先する場合は 1.0 を推奨します。
+REPEAT_PENALTY=1.0
+
+# llama-server の独自 idle sleep は標準では無効にします。
+# VRAM 滞在は IDLE_TIMEOUT、RAM ディスク滞在は GREAT_TIMEOUT で管理します。
+HOSHIKAGE_LLAMA_SERVER_SLEEP_IDLE_SECS=off
 
 ```
 
@@ -172,7 +252,7 @@ TOP_P=0.8
 もし一時的にパスを通したい場合は以下のようにします。
 
 ```bash
-export LD_LIBRARY_PATH=~/.config/hoshikage/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=~/.config/hoshikage/llama.cpp:$LD_LIBRARY_PATH
 ```
 
 ### 4.2 起動コマンド
@@ -206,7 +286,7 @@ After=network.target
 [Service]
 Type=simple
 # 環境変数を指定（絶対パスで記述）
-Environment=LD_LIBRARY_PATH=%h/.config/hoshikage/lib
+Environment=LD_LIBRARY_PATH=%h/.config/hoshikage/llama.cpp
 WorkingDirectory=%h/dev/AI/hoshikage
 ExecStart=%h/dev/AI/hoshikage/target/release/hoshikage
 Restart=on-failure
@@ -263,6 +343,30 @@ curl -X POST http://localhost:3030/v1/chat/completions \
     "stream": true
   }'
 ```
+
+#### 5.1.3 画像入力形式
+
+Chat Completions API の `messages[].content` は、従来の文字列に加えて OpenAI 互換の parts 配列も受け付けます。
+
+```json
+{
+  "role": "user",
+  "content": [
+    { "type": "text", "text": "この画像を説明してください。" },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "data:image/png;base64,...",
+        "detail": "auto"
+      }
+    }
+  ]
+}
+```
+
+対応する画像指定は `data:image/png;base64,...`、`data:image/jpeg;base64,...`、`file:///absolute/path/image.png`、ローカル絶対パスです。外部 URL は初期実装では受け付けません。
+
+画像入力には、モデル登録時に `--mmproj` を指定した Model Bundle が必要です。Vision 非対応モデルへ画像入力を送った場合は明示エラーになります。
 
 ### 5.2 Pythonで使用
 
@@ -344,20 +448,21 @@ echo $LD_LIBRARY_PATH
 # システムCUDAライブラリを使用する場合
 export LD_LIBRARY_PATH=/usr/local/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
 
-# カスタムCUDAライブラリを使用する場合
-export LD_LIBRARY_PATH=~/.config/hoshikage/lib:$LD_LIBRARY_PATH
+# Hoshikage runtime directory を明示する場合
+export LD_LIBRARY_PATH=~/.config/hoshikage/llama.cpp:$LD_LIBRARY_PATH
 
 # ライブラリの存在を確認
 ls /usr/local/cuda/targets/x86_64-linux/lib/libcuda.so
 ls /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so
 ls /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so
 
-# カスタムライブラリの存在を確認
-ls ~/.config/hoshikage/lib/libllama.so 2>/dev/null || echo "カスタムライブラリはありません"
+# Hoshikage runtime の存在を確認
+ls ~/.config/hoshikage/llama.cpp/llama-server 2>/dev/null || echo "llama-server が見つかりません"
+ls ~/.config/hoshikage/llama.cpp/libllama.so 2>/dev/null || echo "libllama が見つかりません"
 ```
 
 **Windowsの場合:**
-`%APPDATA%\hoshikage\lib` に `llama.dll` があるか確認してください。
+`%APPDATA%\hoshikage\llama.cpp` に `llama-server.exe` と `llama.dll` があるか確認してください。
 
 
 ### 7.2 ポートが競合している

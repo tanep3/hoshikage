@@ -15,11 +15,17 @@
 ## ✨ 特徴
 
 ### 🚀 高速推論
-- **llama.cpp (動的リンク)**: システムCUDAライブラリを利用して高速推論
+- **managed llama-server runtime**: ユーザーが導入した llama.cpp runtime を管理して高速推論
 - **GPU加速**: CUDA対応（RTX 1650以降）
 - **Flash Attention + KV Cache**: 推論速度を最大化
 - **Diffusion LLM サポート (v1.1.0)**: LLaDAやRND1などの拡散型言語モデルに対応
 - **単一バイナリ**: 311KBのコンパクトなサイズ
+
+### 🧭 次期モデルランタイム改訂
+- **Model Bundle 管理**: メインモデル、Vision projector、MTP / Draft model、推論設定をモデル単位で管理
+- **Vision / MTP / Draft model 対応**: 最新の GGUF モデル機能に追従する managed `llama-server` runtime
+- **Thinking mode 制御**: 低レイテンシ用途向けにモデル単位で Thinking off を指定可能
+- **CUDA 版 llama.cpp 導入**: Linux CUDA では source build、macOS / Windows / Linux CPU 系では prebuilt archive を使う導入手順を整備
 
 ### 🔌 OpenAI互換API
 - **完全互換**: 既存のOpenAIクライアントライブラリがそのまま使用可能
@@ -54,10 +60,11 @@
 ## 🚀 セットアップ
 
 ### 1. ライブラリの準備 (重要)
-星影は `llama.cpp` の動的ライブラリ (`libllama.so` / `llama.dll`) を使用します。
-ご利用の環境に合わせてライブラリを配置する必要があります。
+星影は llama.cpp 本体を配布しません。
+ご利用の環境に合わせて公式の llama.cpp runtime を導入し、`~/.config/hoshikage/llama.cpp` に配置してください。
 
-詳細な手順は **[ライブラリ運用ガイド](docs/LIBRARY_GUIDE.md)** を参照してください。
+初心者向けの導入手順は **[llama.cpp 最新導入ガイド](docs/llama-cpp-install-guide.md)** を参照してください。
+runtime の探索や運用方針は **[ライブラリ運用ガイド](docs/LIBRARY_GUIDE.md)** にまとめています。
 
 ### 2. インストール
 Cargoを使ってインストールします。
@@ -94,11 +101,11 @@ hoshikage --port 8080
 │  ┌────────────────────────────┐ │
 │  │ Axum (OpenAI互換API)         │ │
 │  ├────────────────────────────┤ │
-│  │ llama.cpp (動的リンク)         │ │
+│  │ managed llama-server runtime   │ │
 │  └────────────────────────────┘ │
 └─────────────────────────────────┘
                  │
-                 │ システムCUDAライブラリ
+                 │ user-installed llama.cpp runtime
                  ▼
 ┌─────────────────────────────────┐
 │   CUDA Driver (動的リンク)            │
@@ -108,9 +115,10 @@ hoshikage --port 8080
 └─────────────────────────────────┘
 ```
 
-**動的リンクの仕組み:**
-- llama.cppはシステムのCUDAライブラリを動的リンクして使用します
-- 環境変数 `LD_LIBRARY_PATH` を設定して検索パスを指定
+**runtime の仕組み:**
+- Hoshikage は `~/.config/hoshikage/llama.cpp/llama-server` を起動・監視します。
+- CUDA / Vulkan / Metal / ROCm などの backend は、ユーザーが導入した llama.cpp runtime に従います。
+- FFI 互換経路を使う場合は、同じ runtime directory の shared library を参照します。
 
 ---
 
@@ -122,16 +130,19 @@ hoshikage --port 8080
 | 起動時間 | <1秒 |
 | 初回モデルロード | 5-10秒 |
 | モデルスイッチ | <1秒 |
-| 推論速度 (RTX 4070 SUPER) | 30-50 tokens/s |
+| 推論速度 (RTX 4070 SUPER) | 90 tokens/s 前後 (12B QAT + MTP + Vision bundle, Thinking off, `TOP_P=0.95`, `REPEAT_PENALTY=1.0`) |
 
 ---
 
 ## 📝 ドキュメント
-(開発者向け)
 
 | ドキュメント | 説明 |
 |-------------|------|
+| [user-manual.md](docs/user-manual.md) | ユーザーマニュアル |
 | [requirements.md](docs/requirements.md) | 要件定義書 |
+| [model-runtime-revision-requirements.md](docs/model-runtime-revision-requirements.md) | QAT / MTP / Draft model / Vision 対応の改訂要件 |
+| [model-runtime-revision-system-design.md](docs/model-runtime-revision-system-design.md) | Model Runtime 改訂のシステム設計 |
+| [llama-cpp-install-guide.md](docs/llama-cpp-install-guide.md) | llama.cpp 最新導入ガイド |
 | [api-spec.md](docs/api-spec.md) | API仕様書 |
 | [system-design.md](docs/system-design.md) | システム設計書 |
 | [nfr-details.md](docs/nfr-details.md) | 非機能要件詳細 |
@@ -141,8 +152,8 @@ hoshikage --port 8080
 
 ## 🙏 謝辞
 
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) - 高速推論エンジン
-  - このソフトウェアは llama.cpp (Copyright (c) 2023 Georgi Gerganov) を含んでいます。
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) - 高速推論エンジン
+  - Hoshikage は llama.cpp runtime を同梱しません。利用者が公式配布物または source build で導入します。
   - ライセンス: [MIT License](https://github.com/ggerganov/llama.cpp/blob/master/LICENSE)
 - [Axum](https://github.com/tokio-rs/axum) - 高速Webフレームワーク
 - [Rust](https://www.rust-lang.org/) - システムプログラミング言語

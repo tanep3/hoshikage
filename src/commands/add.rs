@@ -1,5 +1,10 @@
 use crate::error::Result;
-use crate::model::ModelConfig;
+use crate::{
+    commands::doctor::check_candidate_model,
+    model::{
+        FallbackMode, ModelConfig, SpeculationConfig, SpeculationMode, ThinkingConfig, ThinkingMode,
+    },
+};
 use fs2::FileExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -11,6 +16,18 @@ struct AddModelRequest {
     pub path: String,
     #[serde(default)]
     pub stop: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mmproj: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drafter: Option<String>,
+    #[serde(default)]
+    pub speculation: SpeculationConfig,
+    #[serde(default)]
+    pub thinking: ThinkingConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_ctx: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_gpu_layers: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +57,12 @@ async fn add_via_api(port: u16, name: String, config: ModelConfig) -> Result<()>
             .to_string_lossy()
             .to_string(),
         stop: config.stop,
+        mmproj: config.mmproj,
+        drafter: config.drafter,
+        speculation: config.speculation,
+        thinking: config.thinking,
+        n_ctx: config.n_ctx,
+        n_gpu_layers: config.n_gpu_layers,
     };
 
     let mut last_error = None;
@@ -114,6 +137,13 @@ pub async fn add_model(
     path: String,
     label: String,
     stop_words: Vec<String>,
+    mmproj: Option<String>,
+    mtp_drafter: Option<String>,
+    draft_model: Option<String>,
+    thinking_off: bool,
+    n_ctx: Option<u32>,
+    n_gpu_layers: Option<i32>,
+    check: bool,
     port: u16,
 ) -> Result<()> {
     let file_path = PathBuf::from(&path);
@@ -137,11 +167,50 @@ pub async fn add_model(
         .unwrap_or(".")
         .to_string();
 
-    let config = ModelConfig {
-        path: parent_dir,
-        model: file_name,
-        stop: stop_words,
+    let mut speculation_modes = Vec::new();
+    if mtp_drafter.is_some() {
+        speculation_modes.push(SpeculationMode::Mtp);
+    }
+    if draft_model.is_some() {
+        speculation_modes.push(SpeculationMode::DraftModel);
+    }
+
+    let drafter = match (mtp_drafter, draft_model) {
+        (Some(mtp), Some(draft)) if mtp == draft => Some(mtp),
+        (Some(_mtp), Some(_draft)) => {
+            return Err(crate::error::HoshikageError::ConfigError(
+                "current model bundle format supports one speculation auxiliary model path; use the same path for --mtp-drafter and --draft-model or register one mode at a time".to_string(),
+            ))
+        }
+        (Some(mtp), None) => Some(mtp),
+        (None, Some(draft)) => Some(draft),
+        (None, None) => None,
     };
+
+    let config = ModelConfig {
+        mmproj,
+        drafter,
+        speculation: SpeculationConfig {
+            modes: speculation_modes,
+            fallback: FallbackMode::Warn,
+        },
+        thinking: ThinkingConfig {
+            mode: if thinking_off {
+                ThinkingMode::Off
+            } else {
+                ThinkingMode::Auto
+            },
+        },
+        n_ctx,
+        n_gpu_layers,
+        ..ModelConfig::new_legacy(parent_dir, file_name, stop_words)
+    };
+
+    if check && !check_candidate_model(&label, &config)? {
+        return Err(crate::error::HoshikageError::ConfigError(
+            "Model bundle check failed; registration was not saved".to_string(),
+        ));
+    }
 
     if check_server_running(port).await {
         add_via_api(port, label, config).await
@@ -157,12 +226,15 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = ModelConfig {
-            path: "/models".to_string(),
-            model: "test.gguf".to_string(),
-            stop: vec!["</s>".to_string()],
+            ..ModelConfig::new_legacy(
+                "/models".to_string(),
+                "test.gguf".to_string(),
+                vec!["</s>".to_string()],
+            )
         };
 
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("test.gguf"));
+        assert!(json.contains("base_path"));
     }
 }
