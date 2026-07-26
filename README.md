@@ -142,6 +142,8 @@ hoshikage --port 8080
 | [requirements.md](docs/requirements.md) | 要件定義書 |
 | [model-runtime-revision-requirements.md](docs/model-runtime-revision-requirements.md) | QAT / MTP / Draft model / Vision 対応の改訂要件 |
 | [model-runtime-revision-system-design.md](docs/model-runtime-revision-system-design.md) | Model Runtime 改訂のシステム設計 |
+| [Codex Agent Compatibility 要件定義書](docs/codex-agent-compatibility-requirements.md) | Responses API と Codex Agent Runtime 接続の改訂要件 |
+| [Codex Agent Compatibility システム設計書](docs/codex-agent-compatibility-system-design.md) | 内部会話モデル、Tool Calling、Runtime Lease、SSE状態遷移の設計 |
 | [llama-cpp-install-guide.md](docs/llama-cpp-install-guide.md) | llama.cpp 最新導入ガイド |
 | [api-spec.md](docs/api-spec.md) | API仕様書 |
 | [system-design.md](docs/system-design.md) | システム設計書 |

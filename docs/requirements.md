@@ -113,6 +113,14 @@ Hoshikage は、最新の GGUF モデル機能に追従するため、QAT など
 
 本改訂では、managed `llama-server` runtime を主経路とし、12B QAT + MTP + Vision bundle を Hoshikage 経由で低レイテンシ運用できることを確認済みです。標準運用では VRAM 滞在時間を `IDLE_TIMEOUT`、RAM ディスク滞在時間を `GREAT_TIMEOUT` で管理し、`llama-server` 独自の idle sleep は使いません。
 
+### 🔗 FT-011: Codex Agent Compatibility
+**優先度: 高**
+Hoshikage は、ローカルモデルを実用的な AI 基盤へ接続する境界層として、OpenAI Responses API の必要サブセットと Codex Agent Compatibility を提供します。
+
+Codex が Agent Loop、Tool 実行、承認、Sandbox を担当し、Hoshikage は Responses API 変換、Model Bundle の Tool Calling 方言、managed `llama-server`、モデルと VRAM の管理を担当します。Hoshikage 自身は Tool を実行しません。
+
+詳細要件、確定した意思決定、Phase 0 で実測する項目は [Codex Agent Compatibility 要件定義書](codex-agent-compatibility-requirements.md) に定義します。
+
 ---
 
 ## 3. 品質・性能要件 (どのくらいの性能か)
