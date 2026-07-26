@@ -108,6 +108,18 @@ pub type LlamaSamplerApply =
     unsafe extern "C" fn(smpl: *mut llama_sampler, cur_p: *mut llama_token_data_array);
 pub type LlamaSamplerFree = unsafe extern "C" fn(smpl: *mut llama_sampler);
 
+struct DecodeSingleTokenRequest<'a> {
+    context: *mut llama_context,
+    token: llama_token,
+    position: llama_pos,
+    sequence_id: llama_seq_id,
+    output_logits: bool,
+    decode: LlamaDecode,
+    batch_init: LlamaBatchInit,
+    batch_free: LlamaBatchFree,
+    speculation: Option<&'a SpeculationSession>,
+}
+
 #[derive(Debug, Clone)]
 pub struct InferenceParams {
     pub temperature: f32,
@@ -502,7 +514,7 @@ impl LlamaWrapper {
         Ok(())
     }
 
-    pub fn format_chat_prompt(&self, messages: &[crate::api::ChatMessage]) -> Result<String> {
+    pub fn format_chat_prompt(&self, messages: &[crate::conversation::Message]) -> Result<String> {
         let mut role_cstrings = Vec::with_capacity(messages.len());
         let mut content_cstrings = Vec::with_capacity(messages.len());
         let mut chat_messages = Vec::with_capacity(messages.len());
@@ -1151,17 +1163,17 @@ impl LlamaWrapper {
 
             let prefill_len = tokens.len().saturating_sub(1);
             for &token in tokens.iter().take(prefill_len) {
-                self.decode_single_token(
+                Self::decode_single_token(DecodeSingleTokenRequest {
                     context,
                     token,
                     position,
-                    seq_id,
-                    false,
-                    &llama_decode,
-                    &llama_batch_init,
-                    &llama_batch_free,
-                    Some(session),
-                )?;
+                    sequence_id: seq_id,
+                    output_logits: false,
+                    decode: *llama_decode,
+                    batch_init: *llama_batch_init,
+                    batch_free: *llama_batch_free,
+                    speculation: Some(session),
+                })?;
                 position += 1;
                 prompt_tgt.push(token);
                 Self::remember_token(token, &mut token_counts, &mut recent_tokens, repeat_last_n);
@@ -1309,26 +1321,15 @@ impl LlamaWrapper {
         }
     }
 
-    fn decode_single_token(
-        &self,
-        context: *mut llama_context,
-        token: llama_token,
-        pos: llama_pos,
-        seq_id: llama_seq_id,
-        output_logits: bool,
-        llama_decode: &Symbol<LlamaDecode>,
-        llama_batch_init: &Symbol<LlamaBatchInit>,
-        llama_batch_free: &Symbol<LlamaBatchFree>,
-        speculation: Option<&SpeculationSession>,
-    ) -> Result<()> {
-        let mut batch = unsafe { llama_batch_init(1, 0, 1) };
+    fn decode_single_token(request: DecodeSingleTokenRequest<'_>) -> Result<()> {
+        let mut batch = unsafe { (request.batch_init)(1, 0, 1) };
         if batch.token.is_null()
             || batch.pos.is_null()
             || batch.n_seq_id.is_null()
             || batch.seq_id.is_null()
             || batch.logits.is_null()
         {
-            unsafe { llama_batch_free(batch) };
+            unsafe { (request.batch_free)(batch) };
             return Err(crate::error::HoshikageError::InferenceError(
                 "Failed to init llama_batch".to_string(),
             ));
@@ -1336,33 +1337,31 @@ impl LlamaWrapper {
 
         unsafe {
             batch.n_tokens = 1;
-            *batch.token = token;
-            *batch.pos = pos;
+            *batch.token = request.token;
+            *batch.pos = request.position;
             *batch.n_seq_id = 1;
-            **batch.seq_id = seq_id;
-            *batch.logits = if output_logits || speculation.is_some() {
+            **batch.seq_id = request.sequence_id;
+            *batch.logits = if request.output_logits || request.speculation.is_some() {
                 1
             } else {
                 0
             };
         }
 
-        if unsafe { llama_decode(context, batch) } < 0 {
-            unsafe { llama_batch_free(batch) };
+        if unsafe { (request.decode)(request.context, batch) } < 0 {
+            unsafe { (request.batch_free)(batch) };
             return Err(crate::error::HoshikageError::InferenceError(
                 "Decode failed".to_string(),
             ));
         }
 
-        let process_result = if let Some(speculation) = speculation {
+        let process_result = if let Some(speculation) = request.speculation {
             speculation.process(&batch)
         } else {
             Ok(())
         };
-        unsafe { llama_batch_free(batch) };
-        if let Err(error) = process_result {
-            return Err(error);
-        }
+        unsafe { (request.batch_free)(batch) };
+        process_result?;
 
         Ok(())
     }

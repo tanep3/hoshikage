@@ -1,6 +1,9 @@
 use clap::{Parser, Subcommand};
 use hoshikage::api;
-use hoshikage::commands::{add_model, doctor, list_models, remove_model};
+use hoshikage::commands::{
+    add_model, create_token, doctor, list_models, list_tokens, remove_model, revoke_token,
+    rotate_token, AddModelOptions,
+};
 use hoshikage::config::Config;
 use hoshikage::error::HoshikageError;
 use hoshikage::model::ModelManager;
@@ -16,8 +19,8 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    #[arg(short, long, default_value_t = 3030)]
-    port: u16,
+    #[arg(short, long)]
+    port: Option<u16>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -58,11 +61,33 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    Token {
+        #[command(subcommand)]
+        command: TokenCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TokenCommands {
+    Create {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    List,
+    Rotate {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    Revoke {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> hoshikage::Result<()> {
     let cli = Cli::parse();
+    let command_port = cli.port.unwrap_or(3030);
 
     if let Some(command) = cli.command {
         match command {
@@ -78,9 +103,8 @@ async fn main() -> hoshikage::Result<()> {
                 check,
                 stop_words,
             } => {
-                add_model(
+                add_model(AddModelOptions {
                     path,
-                    label,
                     stop_words,
                     mmproj,
                     mtp_drafter,
@@ -89,19 +113,26 @@ async fn main() -> hoshikage::Result<()> {
                     n_ctx,
                     n_gpu_layers,
                     check,
-                    cli.port,
-                )
+                    label,
+                    port: command_port,
+                })
                 .await?;
             }
             Commands::Rm { label } => {
-                remove_model(label, cli.port).await?;
+                remove_model(label, command_port).await?;
             }
             Commands::List { details } => {
-                list_models(cli.port, details).await?;
+                list_models(command_port, details).await?;
             }
             Commands::Doctor { model, json } => {
                 doctor(model, json).await?;
             }
+            Commands::Token { command } => match command {
+                TokenCommands::Create { name } => create_token(name).await?,
+                TokenCommands::List => list_tokens().await?,
+                TokenCommands::Rotate { name } => rotate_token(name).await?,
+                TokenCommands::Revoke { name } => revoke_token(name).await?,
+            },
         }
         return Ok(());
     }
@@ -147,11 +178,19 @@ async fn main() -> hoshikage::Result<()> {
     // タイムアウト監視タスクを開始 (IDLE_TIMEOUT: VRAMオフロード, GREAT_TIMEOUT: RAMディスク解放)
     manager.clone().start_idle_monitor();
 
-    let app = api::create_router(manager);
+    let auth_policy = hoshikage::security::AuthPolicy::for_bind_host(&config.host);
+    let token_store = Arc::new(hoshikage::security::FileTokenStore::new(
+        config.auth_token_path()?,
+    ));
+    let auth_state = hoshikage::security::AuthState::validated(auth_policy, token_store)
+        .await
+        .map_err(|error| HoshikageError::ConfigError(error.to_string()))?;
+    let app = api::create_router_with_auth(manager, auth_state);
 
-    let listener = tokio::net::TcpListener::bind(format!("{}:{}", config.host, cli.port)).await?;
+    let port = cli.port.unwrap_or(config.port);
+    let listener = tokio::net::TcpListener::bind(format!("{}:{}", config.host, port)).await?;
 
-    tracing::info!("Hoshikage server starting on {}:{}", config.host, cli.port);
+    tracing::info!("Hoshikage server starting on {}:{}", config.host, port);
 
     axum::serve(listener, app).await?;
 

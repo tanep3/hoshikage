@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::model::ThinkingMode;
 use async_stream::stream;
 use axum::{
     body::Body,
@@ -12,29 +13,8 @@ use base64::Engine;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-struct ManagedRequestGuard {
-    manager: Arc<crate::model::ModelManager>,
-    model: String,
-}
-
-impl ManagedRequestGuard {
-    fn new(manager: Arc<crate::model::ModelManager>, model: &str) -> Self {
-        manager.begin_managed_request(model);
-        Self {
-            manager,
-            model: model.to_string(),
-        }
-    }
-}
-
-impl Drop for ManagedRequestGuard {
-    fn drop(&mut self) {
-        self.manager.finish_managed_request(&self.model);
-    }
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatCompletionRequest {
@@ -143,6 +123,35 @@ impl ChatContent {
 impl ChatMessage {
     pub fn text_content(&self) -> String {
         self.content.to_prompt_text()
+    }
+
+    fn to_conversation_message(&self) -> std::result::Result<crate::conversation::Message, String> {
+        let role =
+            crate::conversation::Role::parse(&self.role).map_err(|error| error.to_string())?;
+        let content = match &self.content {
+            ChatContent::Text(text) => vec![crate::conversation::ContentPart::Text(text.clone())],
+            ChatContent::Parts(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    ChatContentPart::Text { text } => {
+                        crate::conversation::ContentPart::Text(text.clone())
+                    }
+                    ChatContentPart::ImageUrl { image_url } => {
+                        let (source, detail) = match image_url {
+                            ImageUrlContent::Object { url, detail } => {
+                                (url.clone(), detail.clone())
+                            }
+                            ImageUrlContent::Url(url) => (url.clone(), None),
+                        };
+                        crate::conversation::ContentPart::Image(crate::conversation::ImageInput {
+                            source,
+                            detail,
+                        })
+                    }
+                })
+                .collect(),
+        };
+        crate::conversation::Message::new(role, content).map_err(|error| error.to_string())
     }
 }
 
@@ -355,7 +364,27 @@ pub async fn chat_completion(
         );
     }
 
-    let prompt = match manager.build_prompt(&model_name, &req.messages).await {
+    let conversation_messages = match req
+        .messages
+        .iter()
+        .map(ChatMessage::to_conversation_message)
+        .collect::<std::result::Result<Vec<_>, _>>()
+    {
+        Ok(messages) => messages,
+        Err(message) => {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                message,
+                "invalid_request",
+            );
+        }
+    };
+
+    let prompt = match manager
+        .build_prompt(&model_name, &conversation_messages)
+        .await
+    {
         Ok(prompt) => prompt,
         Err(e) => {
             return error_response(
@@ -463,18 +492,6 @@ async fn managed_chat_completion(
     req: ChatCompletionRequest,
     model_config: crate::model::ModelConfig,
 ) -> Response {
-    let endpoint = match manager.ensure_managed_llama_server(&req.model).await {
-        Ok(endpoint) => endpoint,
-        Err(e) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "inference_failed",
-                e.to_string(),
-                "internal_server_error",
-            )
-        }
-    };
-
     let body = match build_managed_upstream_body(&manager, &req, &model_config) {
         Ok(body) => body,
         Err(message) => {
@@ -486,13 +503,26 @@ async fn managed_chat_completion(
             )
         }
     };
+    let runtime_lease = match manager.acquire_managed_llama_server(&req.model).await {
+        Ok(lease) => lease,
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "inference_failed",
+                e.to_string(),
+                "internal_server_error",
+            )
+        }
+    };
 
-    let url = format!("{}/v1/chat/completions", endpoint);
-    let request_guard = ManagedRequestGuard::new(manager.clone(), &req.model);
-    let upstream = match reqwest::Client::new().post(url).json(&body).send().await {
+    let upstream = match manager.send_managed_chat(&runtime_lease, &body).await {
         Ok(response) => response,
         Err(e) => {
-            manager.mark_managed_server_unhealthy(&req.model);
+            manager.mark_managed_lease_unhealthy(
+                &req.model,
+                &runtime_lease,
+                format!("upstream request failed: {e}"),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "inference_failed",
@@ -513,9 +543,9 @@ async fn managed_chat_completion(
     if req.stream.unwrap_or(false) {
         let mut upstream_stream = upstream.bytes_stream();
         let stream = stream! {
-            let _request_guard = request_guard;
+            let _runtime_lease = runtime_lease;
             while let Some(chunk) = upstream_stream.next().await {
-                yield chunk.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err));
+                yield chunk.map_err(std::io::Error::other);
             }
         };
         let mut response = Response::builder()
@@ -541,7 +571,9 @@ async fn managed_chat_completion(
 
     match upstream.bytes().await {
         Ok(bytes) => {
-            drop(request_guard);
+            if let Err(error) = runtime_lease.finish() {
+                tracing::error!(error = %error, "Failed to finish managed runtime lease");
+            }
             let mut response = Response::builder()
                 .status(status)
                 .body(Body::from(bytes))
@@ -563,8 +595,11 @@ async fn managed_chat_completion(
             with_fallback_headers(response, &manager)
         }
         Err(e) => {
-            manager.mark_managed_server_unhealthy(&req.model);
-            drop(request_guard);
+            manager.mark_managed_lease_unhealthy(
+                &req.model,
+                &runtime_lease,
+                format!("upstream response failed: {e}"),
+            );
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "inference_failed",
@@ -616,6 +651,12 @@ fn build_managed_upstream_body(
             .repeat_penalty
             .unwrap_or(manager.default_repeat_penalty())),
     );
+    if model_config.thinking.mode == ThinkingMode::Off {
+        object.insert(
+            "chat_template_kwargs".to_string(),
+            serde_json::json!({ "enable_thinking": false }),
+        );
+    }
 
     Ok(body)
 }
@@ -681,7 +722,7 @@ fn prepare_image_url_for_upstream(
     Ok(ImageUrlContent::Object { url, detail })
 }
 
-fn image_media_type(path: &PathBuf) -> std::result::Result<&'static str, String> {
+fn image_media_type(path: &Path) -> std::result::Result<&'static str, String> {
     match path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -1086,6 +1127,41 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&serde_json::json!("<request-stop>")));
+    }
+
+    #[test]
+    fn managed_upstream_body_disables_template_thinking_for_thinking_off_bundle() {
+        let manager = ModelManager::new(Config::default());
+        let mut model_config =
+            ModelConfig::new_legacy("/models".to_string(), "main.gguf".to_string(), Vec::new());
+        model_config.thinking.mode = ThinkingMode::Off;
+        let req = ChatCompletionRequest {
+            model: "unsloth-gemma4-12b-qat-thinking-off".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: ChatContent::Text("Hello".to_string()),
+            }],
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            stream: None,
+            stop: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            repeat_penalty: None,
+            repeat_last_n: None,
+            diffusion_steps: None,
+            diffusion_algorithm: None,
+            diffusion_schedule: None,
+            diffusion_cfg_scale: None,
+        };
+
+        let body = build_managed_upstream_body(&manager, &req, &model_config).unwrap();
+
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"],
+            serde_json::json!(false)
+        );
     }
 
     #[test]

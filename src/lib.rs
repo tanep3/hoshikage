@@ -1,7 +1,10 @@
 pub mod api;
 pub mod config;
+pub mod conversation;
 pub mod inference;
 pub mod model;
+pub mod runtime;
+pub mod security;
 
 pub mod commands;
 

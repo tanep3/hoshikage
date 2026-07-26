@@ -36,6 +36,20 @@ struct AddModelResponse {
     pub message: String,
 }
 
+pub struct AddModelOptions {
+    pub path: String,
+    pub label: String,
+    pub stop_words: Vec<String>,
+    pub mmproj: Option<String>,
+    pub mtp_drafter: Option<String>,
+    pub draft_model: Option<String>,
+    pub thinking_off: bool,
+    pub n_ctx: Option<u32>,
+    pub n_gpu_layers: Option<i32>,
+    pub check: bool,
+    pub port: u16,
+}
+
 async fn check_server_running(port: u16) -> bool {
     let url = format!("http://127.0.0.1:{}/v1/status", port);
     Client::new()
@@ -133,19 +147,20 @@ fn add_directly(name: String, config: ModelConfig) -> Result<()> {
     Ok(())
 }
 
-pub async fn add_model(
-    path: String,
-    label: String,
-    stop_words: Vec<String>,
-    mmproj: Option<String>,
-    mtp_drafter: Option<String>,
-    draft_model: Option<String>,
-    thinking_off: bool,
-    n_ctx: Option<u32>,
-    n_gpu_layers: Option<i32>,
-    check: bool,
-    port: u16,
-) -> Result<()> {
+pub async fn add_model(options: AddModelOptions) -> Result<()> {
+    let AddModelOptions {
+        path,
+        label,
+        stop_words,
+        mmproj,
+        mtp_drafter,
+        draft_model,
+        thinking_off,
+        n_ctx,
+        n_gpu_layers,
+        check,
+        port,
+    } = options;
     let file_path = PathBuf::from(&path);
 
     if !file_path.exists() {

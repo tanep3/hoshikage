@@ -44,7 +44,7 @@ pub trait RuntimeBackend: Send {
     fn load(&mut self, request: &LlamaLoadRequest) -> Result<LoadedRuntimeInfo>;
     fn unload(&mut self);
     fn prepare_for_inference(&mut self) -> Result<()>;
-    fn format_chat_prompt(&self, messages: &[crate::api::ChatMessage]) -> Result<String>;
+    fn format_chat_prompt(&self, messages: &[crate::conversation::Message]) -> Result<String>;
     fn count_tokens(&self, text: &str) -> Result<i32>;
     fn is_diffusion_model(&self) -> Result<bool>;
     fn generate(&self, prompt: &str, params: &InferenceParams) -> Result<String>;
@@ -164,7 +164,7 @@ impl RuntimeBackend for LlamaFfiBackend {
         self.wrapper.prepare_for_inference(&self.effective_config)
     }
 
-    fn format_chat_prompt(&self, messages: &[crate::api::ChatMessage]) -> Result<String> {
+    fn format_chat_prompt(&self, messages: &[crate::conversation::Message]) -> Result<String> {
         self.wrapper.format_chat_prompt(messages)
     }
 

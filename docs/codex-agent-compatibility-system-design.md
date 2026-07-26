@@ -5,7 +5,7 @@
 **版:** 1.1
 **作成日:** 2026-07-27
 **確定日:** 2026-07-27
-**状態:** システム設計Fix・Phase 0完了・Phase 1未承認
+**状態:** システム設計Fix・Phase 0完了・Phase 1 Fix・Phase 2実装中
 **対応ブランチ:** `feature/codex-agent-compatibility`
 **対応要件:** [codex-agent-compatibility-requirements.md](codex-agent-compatibility-requirements.md)
 
@@ -2066,6 +2066,8 @@ mockは`InferenceGateway`のfakeだけで済ませず、HTTP adapter contractも
 ### Phase 1: 構造リファクタリング
 
 目的: Wireを追加する前に内部境界を作る。
+
+**状態:** 2026-07-27 Phase 1 Fix
 
 - `Conversation`
 - `ModelRequest` / `ModelCompletion`

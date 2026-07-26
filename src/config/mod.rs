@@ -1,3 +1,3 @@
 pub mod settings;
 
-pub use settings::{Config, RuntimeBackendKind};
+pub use settings::{Config, RuntimeBackendKind, UnknownFieldPolicy};

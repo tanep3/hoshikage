@@ -4,7 +4,7 @@ use crate::inference::{CapabilityStatus, LlamaServerRuntimeReport, RuntimeCapabi
 use crate::model::{FallbackMode, ModelConfig};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -138,32 +138,32 @@ fn resolve_runtime_libllama_path(
 }
 
 fn llama_server_runtime_checks(report: &LlamaServerRuntimeReport) -> Vec<DiagnosticCheck> {
-    let mut checks = Vec::new();
-    checks.push(directory_check(
-        "runtime.llama_cpp.dir",
-        &report.runtime_dir,
-        "llama.cpp runtime directory が見つかります",
-        "llama.cpp runtime directory が見つかりません",
-    ));
-    checks.push(file_check(
-        "runtime.llama_server.path",
-        &report.llama_server_path,
-        "llama-server が見つかります",
-        "llama-server が見つかりません",
-    ));
-    checks.push(file_check(
-        "runtime.llama_cli.path",
-        &report.llama_cli_path,
-        "llama-cli が見つかります",
-        "llama-cli が見つかりません",
-    ));
-    checks.push(file_check(
-        "runtime.managed_libllama.path",
-        &report.libllama_path,
-        "managed runtime の libllama が見つかります",
-        "managed runtime の libllama が見つかりません",
-    ));
-    checks
+    vec![
+        directory_check(
+            "runtime.llama_cpp.dir",
+            &report.runtime_dir,
+            "llama.cpp runtime directory が見つかります",
+            "llama.cpp runtime directory が見つかりません",
+        ),
+        file_check(
+            "runtime.llama_server.path",
+            &report.llama_server_path,
+            "llama-server が見つかります",
+            "llama-server が見つかりません",
+        ),
+        file_check(
+            "runtime.llama_cli.path",
+            &report.llama_cli_path,
+            "llama-cli が見つかります",
+            "llama-cli が見つかりません",
+        ),
+        file_check(
+            "runtime.managed_libllama.path",
+            &report.libllama_path,
+            "managed runtime の libllama が見つかります",
+            "managed runtime の libllama が見つかりません",
+        ),
+    ]
 }
 
 fn runtime_checks(report: &RuntimeCapabilityReport) -> Vec<DiagnosticCheck> {
@@ -233,7 +233,7 @@ fn runtime_checks(report: &RuntimeCapabilityReport) -> Vec<DiagnosticCheck> {
     checks
 }
 
-fn optional_adapter_file_check(path: &PathBuf) -> DiagnosticCheck {
+fn optional_adapter_file_check(path: &Path) -> DiagnosticCheck {
     if path.is_file() {
         DiagnosticCheck {
             id: "runtime.speculation_adapter.path".to_string(),
@@ -366,7 +366,7 @@ fn capability_check(
     }
 }
 
-fn file_check(id: &str, path: &PathBuf, ok_message: &str, err_message: &str) -> DiagnosticCheck {
+fn file_check(id: &str, path: &Path, ok_message: &str, err_message: &str) -> DiagnosticCheck {
     if path.is_file() {
         DiagnosticCheck {
             id: id.to_string(),
@@ -384,12 +384,7 @@ fn file_check(id: &str, path: &PathBuf, ok_message: &str, err_message: &str) -> 
     }
 }
 
-fn directory_check(
-    id: &str,
-    path: &PathBuf,
-    ok_message: &str,
-    err_message: &str,
-) -> DiagnosticCheck {
+fn directory_check(id: &str, path: &Path, ok_message: &str, err_message: &str) -> DiagnosticCheck {
     if path.is_dir() {
         DiagnosticCheck {
             id: id.to_string(),
@@ -412,7 +407,7 @@ fn directory_check(
 
 fn optional_backend_file_check(
     id: &str,
-    path: &PathBuf,
+    path: &Path,
     ok_message: &str,
     warn_message: &str,
 ) -> DiagnosticCheck {

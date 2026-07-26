@@ -2,10 +2,11 @@ use crate::config::{Config, RuntimeBackendKind};
 use crate::error::Result;
 use crate::inference::llama_wrapper::InferenceParams;
 use crate::inference::{
-    LlamaFfiBackend, LlamaLoadRequest, LlamaServerCommandSpec, LlamaServerLaunchConfig,
-    LlamaServerProcess, LoadedRuntimeInfo, RuntimeBackend, ThinkingController,
-    ThinkingStreamFilter,
+    LlamaFfiBackend, LlamaLoadRequest, LlamaServerClient, LlamaServerCommandSpec,
+    LlamaServerLaunchConfig, LlamaServerProcess, LoadedRuntimeInfo, RuntimeBackend,
+    ThinkingController, ThinkingStreamFilter,
 };
+use crate::runtime::{RuntimeCoordinator, RuntimeEndpoint, RuntimeLease};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -13,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::Semaphore;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
@@ -61,25 +62,41 @@ impl Default for SpeculationConfig {
 mod runtime_status_tests {
     use super::*;
 
-    #[test]
-    fn tracks_active_managed_requests_in_status() {
+    #[tokio::test]
+    async fn tracks_active_managed_runtime_lease_in_status() {
         let manager = ModelManager::new(Config::default());
-
-        {
-            let mut state = manager.inference.lock().unwrap();
-            state.current_model = Some("test-model".to_string());
-        }
-
-        manager.begin_managed_request("test-model");
-        manager.begin_managed_request("test-model");
-
-        let status = manager.runtime_status();
-        assert_eq!(status.active_requests, 2);
-
-        manager.finish_managed_request("test-model");
+        let preparation = manager
+            .managed_runtime
+            .prepare(
+                crate::conversation::ModelId::new("test-model").unwrap(),
+                crate::conversation::RequestId::new("request-1").unwrap(),
+            )
+            .await
+            .unwrap();
+        let lease = preparation
+            .activate(
+                crate::runtime::RuntimeEndpoint::new("http://127.0.0.1:13030").unwrap(),
+                LoadedRuntimeInfo {
+                    main_model: PathBuf::from("model.gguf"),
+                    mmproj: None,
+                    draft_model: None,
+                    n_ctx: 16384,
+                    n_gpu_layers: 0,
+                    vision_supported: false,
+                    vision_marker: None,
+                    speculation_enabled: false,
+                    speculation_mode: SpeculationMode::Off,
+                    speculation_fallback_reason: None,
+                },
+            )
+            .unwrap();
 
         let status = manager.runtime_status();
         assert_eq!(status.active_requests, 1);
+
+        drop(lease);
+        let status = manager.runtime_status();
+        assert_eq!(status.active_requests, 0);
     }
 }
 
@@ -162,7 +179,7 @@ fn bundle_total_bytes(files: &[BundleFile]) -> Result<u64> {
     Ok(total)
 }
 
-fn ensure_ramdisk_capacity(path: &PathBuf, required_bytes: u64) -> Result<()> {
+fn ensure_ramdisk_capacity(path: &std::path::Path, required_bytes: u64) -> Result<()> {
     let available = available_bytes(path)?;
     if available < required_bytes {
         return Err(crate::error::HoshikageError::Other(format!(
@@ -174,7 +191,7 @@ fn ensure_ramdisk_capacity(path: &PathBuf, required_bytes: u64) -> Result<()> {
 }
 
 #[cfg(target_family = "unix")]
-fn available_bytes(path: &PathBuf) -> Result<u64> {
+fn available_bytes(path: &std::path::Path) -> Result<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -186,11 +203,11 @@ fn available_bytes(path: &PathBuf) -> Result<u64> {
     }
 
     let stat = unsafe { stat.assume_init() };
-    Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+    Ok(stat.f_bavail * stat.f_frsize)
 }
 
 #[cfg(not(target_family = "unix"))]
-fn available_bytes(_path: &PathBuf) -> Result<u64> {
+fn available_bytes(_path: &std::path::Path) -> Result<u64> {
     Ok(u64::MAX)
 }
 
@@ -309,9 +326,11 @@ mod ramdisk_tests {
 
     #[test]
     fn load_request_uses_model_overrides_and_ramdisk_aux_paths() {
-        let mut runtime_config = Config::default();
-        runtime_config.n_ctx = 4096;
-        runtime_config.n_gpu_layers = 10;
+        let runtime_config = Config {
+            n_ctx: 4096,
+            n_gpu_layers: 10,
+            ..Config::default()
+        };
         let manager = ModelManager::new(runtime_config);
         let model_config = ModelConfig {
             mmproj: Some("mmproj-source.gguf".to_string()),
@@ -350,32 +369,22 @@ mod ramdisk_tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SpeculationMode {
+    #[default]
     Off,
     Mtp,
     DraftModel,
 }
 
-impl Default for SpeculationMode {
-    fn default() -> Self {
-        Self::Off
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FallbackMode {
+    #[default]
     Warn,
     Strict,
     Off,
-}
-
-impl Default for FallbackMode {
-    fn default() -> Self {
-        Self::Warn
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -392,17 +401,12 @@ impl Default for ThinkingConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingMode {
+    #[default]
     Auto,
     Off,
-}
-
-impl Default for ThinkingMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl ModelConfig {
@@ -621,16 +625,22 @@ struct RamdiskManifestFile {
 }
 
 pub struct ModelManager {
-    models: Arc<RwLock<HashMap<String, ModelConfig>>>,
+    registry: crate::model::ModelRegistry,
     config: Config,
     inference: Arc<Mutex<InferenceState>>,
     semaphore: Arc<Semaphore>,
+    managed_runtime: RuntimeCoordinator,
+    llama_server_client: LlamaServerClient,
 }
 
 impl ModelManager {
     pub fn new(config: Config) -> Self {
+        let managed_runtime = RuntimeCoordinator::new(
+            config.responses_queue_capacity,
+            Duration::from_millis(config.responses_queue_timeout_ms),
+        );
         Self {
-            models: Arc::new(RwLock::new(HashMap::new())),
+            registry: crate::model::ModelRegistry::new(config.clone()),
             config,
             inference: Arc::new(Mutex::new(InferenceState {
                 backend: None,
@@ -643,27 +653,32 @@ impl ModelManager {
                 last_access: Instant::now(),
             })),
             semaphore: Arc::new(Semaphore::new(1)),
+            managed_runtime,
+            llama_server_client: LlamaServerClient::new(),
         }
+    }
+
+    pub async fn send_managed_chat(
+        &self,
+        lease: &RuntimeLease,
+        body: &serde_json::Value,
+    ) -> reqwest::Result<reqwest::Response> {
+        self.llama_server_client
+            .chat_completions(lease.endpoint(), body)
+            .await
     }
 
     pub async fn load_models(&self) -> Result<()> {
         let model_map_path = self.config.model_map_path()?;
 
-        if model_map_path.exists() {
-            let content = std::fs::read_to_string(&model_map_path)?;
-            let models: HashMap<String, ModelConfig> = serde_json::from_str(&content)?;
-            let mut models_guard = self.models.write().await;
-            *models_guard = models;
-
+        if self.registry.load().await? {
             tracing::info!(
                 "Loaded {} models from {}",
-                models_guard.len(),
+                self.registry.names().await.len(),
                 model_map_path.display()
             );
         } else if let Some(models) = self.scan_model_dir()? {
-            let mut models_guard = self.models.write().await;
-            *models_guard = models;
-            drop(models_guard);
+            self.registry.replace(models).await;
             self.save_models().await?;
             tracing::info!(
                 "Model map file not found. Scanned model directory and saved to {}",
@@ -677,40 +692,15 @@ impl ModelManager {
     }
 
     pub async fn save_models(&self) -> Result<()> {
-        let model_map_path = self.config.model_map_path()?;
-
-        let content = serde_json::to_string_pretty(&*self.models.read().await)?;
-
-        if let Some(parent) = model_map_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        std::fs::write(&model_map_path, &content)?;
-
-        tracing::info!(
-            "Saved {} models to {}",
-            content.lines().count(),
-            model_map_path.display()
-        );
-
-        Ok(())
+        self.registry.save().await
     }
 
     pub async fn get_model(&self, name: &str) -> Result<ModelConfig> {
-        let models = self.models.read().await;
-
-        models
-            .get(name)
-            .cloned()
-            .ok_or_else(|| crate::error::HoshikageError::ModelNotFound(name.to_string()))
+        self.registry.get(name).await
     }
 
     pub async fn add_model(&self, name: String, config: ModelConfig) -> Result<()> {
-        let mut models = self.models.write().await;
-
-        models.insert(name.clone(), config);
-        drop(models);
-        self.save_models().await?;
+        self.registry.insert(name.clone(), config).await?;
 
         tracing::info!("Added model: {}", name);
 
@@ -718,11 +708,7 @@ impl ModelManager {
     }
 
     pub async fn remove_model(&self, name: &str) -> Result<()> {
-        let mut models = self.models.write().await;
-
-        if models.remove(name).is_some() {
-            drop(models);
-            self.save_models().await?;
+        if self.registry.remove(name).await? {
             tracing::info!("Removed model: {}", name);
         }
 
@@ -730,12 +716,11 @@ impl ModelManager {
     }
 
     pub async fn list_models(&self) -> Vec<String> {
-        let models = self.models.read().await;
-        models.keys().cloned().collect()
+        self.registry.names().await
     }
 
     pub async fn list_hoshikage_models(&self) -> Vec<HoshikageModelInfo> {
-        let models = self.models.read().await;
+        let models = self.registry.snapshot().await;
         let mut data = models
             .iter()
             .map(|(name, config)| HoshikageModelInfo {
@@ -810,7 +795,7 @@ impl ModelManager {
                     .map(LoadedRuntimeInfoSnapshot::from)
             },
             last_fallback: state.last_fallback.clone(),
-            active_requests: state.active_requests,
+            active_requests: self.managed_runtime.active_requests(),
         }
     }
 
@@ -834,34 +819,21 @@ impl ModelManager {
         self.config.runtime_backend == RuntimeBackendKind::LlamaServerManaged
     }
 
-    pub fn begin_managed_request(&self, model_name: &str) {
-        let Ok(mut state) = self.inference.lock() else {
-            tracing::error!("Failed to lock inference state when beginning managed request");
-            return;
-        };
-        if state.current_model.as_deref() == Some(model_name) {
-            state.active_requests = state.active_requests.saturating_add(1);
-            state.last_access = Instant::now();
-        }
-    }
-
-    pub fn finish_managed_request(&self, model_name: &str) {
-        let Ok(mut state) = self.inference.lock() else {
-            tracing::error!("Failed to lock inference state when finishing managed request");
-            return;
-        };
-        if state.current_model.as_deref() == Some(model_name) {
-            state.active_requests = state.active_requests.saturating_sub(1);
-            state.last_access = Instant::now();
-        }
-    }
-
-    pub async fn ensure_managed_llama_server(&self, model_name: &str) -> Result<String> {
-        let _permit =
-            self.semaphore.clone().acquire_owned().await.map_err(|e| {
-                crate::error::HoshikageError::Other(format!("Semaphore error: {}", e))
+    pub async fn acquire_managed_llama_server(&self, model_name: &str) -> Result<RuntimeLease> {
+        self.reconcile_managed_runtime_state()?;
+        let model_id = crate::conversation::ModelId::new(model_name).map_err(|error| {
+            crate::error::HoshikageError::ConfigError(format!("invalid model id: {error}"))
+        })?;
+        let request_id =
+            crate::conversation::RequestId::new(format!("req_{}", uuid::Uuid::new_v4().simple()))
+                .map_err(|error| {
+                crate::error::HoshikageError::Other(format!("failed to create request id: {error}"))
             })?;
-
+        let preparation = self
+            .managed_runtime
+            .prepare(model_id, request_id)
+            .await
+            .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))?;
         let model_config = self.get_model(model_name).await?;
         let endpoint = self.llama_server_base_url();
         let mut started = false;
@@ -881,12 +853,6 @@ impl ModelManager {
                 state.current_model.as_deref() == Some(model_name) && managed_running;
 
             if !current_loaded {
-                if state.active_requests > 0 {
-                    return Err(crate::error::HoshikageError::Other(format!(
-                        "managed runtime is busy with {} active request(s)",
-                        state.active_requests
-                    )));
-                }
                 self.stop_loaded_runtime(&mut state);
                 let (model_path, ramdisk_bundle) =
                     self.resolve_model_path(model_name, &model_config)?;
@@ -919,7 +885,51 @@ impl ModelManager {
             }
         }
 
-        Ok(endpoint)
+        let loaded = {
+            let state = self.inference.lock().map_err(|error| {
+                crate::error::HoshikageError::Other(format!("Lock error: {error}"))
+            })?;
+            state.managed_loaded_info.clone().ok_or_else(|| {
+                crate::error::HoshikageError::InferenceError(
+                    "managed llama-server has no loaded runtime information".to_string(),
+                )
+            })?
+        };
+        let endpoint = RuntimeEndpoint::new(endpoint)
+            .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))?;
+        preparation
+            .activate(endpoint, loaded)
+            .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))
+    }
+
+    fn reconcile_managed_runtime_state(&self) -> Result<()> {
+        let phase = self
+            .managed_runtime
+            .phase()
+            .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))?;
+        let crate::runtime::RuntimePhase::Ready(ready) = phase else {
+            return Ok(());
+        };
+        let observed_ready = {
+            let mut state = self.inference.lock().map_err(|error| {
+                crate::error::HoshikageError::Other(format!("Lock error: {error}"))
+            })?;
+            let running = state
+                .managed_server
+                .as_mut()
+                .map(|server| server.is_running())
+                .unwrap_or(false);
+            running && state.current_model.as_deref() == Some(ready.model.as_str())
+        };
+        if !observed_ready {
+            self.managed_runtime
+                .mark_unhealthy(
+                    ready.generation,
+                    "coordinator state did not match managed process state",
+                )
+                .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))?;
+        }
+        Ok(())
     }
 
     async fn start_managed_server_without_speculation(
@@ -992,16 +1002,17 @@ impl ModelManager {
 
                 let idle_secs = state.last_access.elapsed().as_secs();
 
-                if state.active_requests > 0 {
+                if self.managed_runtime.active_requests() > 0 || state.active_requests > 0 {
                     continue;
                 }
 
-                if idle_timeout > 0 && idle_secs >= idle_timeout {
-                    if state.backend.is_some() || state.managed_server.is_some() {
-                        self.stop_loaded_runtime(&mut state);
-                        state.current_model = None;
-                        tracing::info!("Unloaded model due to idle timeout");
-                    }
+                if idle_timeout > 0
+                    && idle_secs >= idle_timeout
+                    && (state.backend.is_some() || state.managed_server.is_some())
+                {
+                    self.stop_loaded_runtime(&mut state);
+                    state.current_model = None;
+                    tracing::info!("Unloaded model due to idle timeout");
                 }
 
                 if great_timeout > 0 && idle_secs >= great_timeout * 60 {
@@ -1095,7 +1106,7 @@ impl ModelManager {
     pub async fn build_prompt(
         &self,
         model_name: &str,
-        messages: &[crate::api::ChatMessage],
+        messages: &[crate::conversation::Message],
     ) -> Result<String> {
         let model_config = self.get_model(model_name).await?;
         let mut state = self
@@ -1338,6 +1349,26 @@ impl ModelManager {
         state.managed_server = None;
         state.managed_loaded_info = None;
         state.current_model = None;
+    }
+
+    pub fn mark_managed_lease_unhealthy(
+        &self,
+        model_name: &str,
+        lease: &RuntimeLease,
+        reason: impl Into<String>,
+    ) {
+        self.mark_managed_server_unhealthy(model_name);
+        if let Err(error) = self
+            .managed_runtime
+            .mark_unhealthy(lease.generation(), reason)
+        {
+            tracing::error!(
+                model = model_name,
+                generation = lease.generation().value(),
+                error = %error,
+                "Failed to mark managed runtime generation unhealthy"
+            );
+        }
     }
 
     fn stop_loaded_runtime(&self, state: &mut InferenceState) {
