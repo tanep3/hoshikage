@@ -1,0 +1,26 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\n  \"type\": \"function_call\",\n  \"name\": \"inspect_file\",\n  \"arguments\": {\n    \"path\": \"資料/My File.md\",\n    \"line_start\": 17,\n    \"include_hidden\": false,\n    \"tags\": [\n      \"alpha\",\n      \"日本語\"\n    ],\n    \"options\": {\n      \"mode\": \"strict\",\n      \"retry\": 2\n    }\n  }\n}"
+      }
+    }
+  ],
+  "model": "unsloth-gemma4-12b-qat-thinking-off",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 114,
+    "prompt_tokens": 85,
+    "total_tokens": 199
+  },
+  "_fixture": {
+    "provenance": "observed-normalized",
+    "llama_server_build": "b10075-76f46ad29",
+    "context_tokens": 16384,
+    "response_format": "json_schema",
+    "thinking_parameter": "enable_thinking=false"
+  }
+}

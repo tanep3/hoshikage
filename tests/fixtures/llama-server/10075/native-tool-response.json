@@ -1,0 +1,34 @@
+{
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_fixture_native",
+            "type": "function",
+            "function": {
+              "name": "read_file",
+              "arguments": "{\"path\":\"README.md\"}"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "model": "Qwen3.5-0.8B-Q4_K_M",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 26,
+    "prompt_tokens": 289,
+    "total_tokens": 315
+  },
+  "_fixture": {
+    "provenance": "observed-normalized",
+    "llama_server_build": "b10075-76f46ad29",
+    "thinking": false
+  }
+}

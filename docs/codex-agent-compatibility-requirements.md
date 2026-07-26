@@ -2,7 +2,7 @@
 
 **プロジェクト名:** Hoshikage Codex Agent Compatibility
 **文書種別:** 要件定義書
-**版:** 1.1
+**版:** 1.2
 **作成日:** 2026-07-27
 **更新日:** 2026-07-27
 **状態:** 要件Fix
@@ -929,17 +929,18 @@ Phase 2 を SSE より先に置く案を推奨する。Codex Agent Compatibility
 | D-012 | Bundle 設定を正とし、`doctor` が自動検出との差異を警告 |
 | D-013 | 未設定の既存 Bundle は `disabled`。`doctor` が候補を提案し、利用者操作で反映 |
 | D-014 | Hoshikage は Codex 接続設定を出力支援するが、自動書換え・Provider選択・モデル選択を行わない |
-| D-015 | native と generic JSON の最低 2 Bundle で検証。具体モデルは Phase 0 で記録 |
+| D-015 | 標準Gemma 4でnativeとgeneric JSONの2 Strategyを検証。Qwen/LFMは補助回帰 |
 | D-016 | 同じ改訂内で読取系の後に副作用系 Skill を検証 |
 | D-017 | 検証済み Codex minor 系列を明示 |
 | D-018 | 通常時の本文ログは禁止。debug capture は明示 opt-in、隔離保存、短期削除 |
 | D-019 | 全 Bundle から Codex 用モデルカタログと制限値を生成し、利用者・上位アプリがモデルを選択 |
 | D-020 | 対話用 `on-request` と無人実行用 `never` を分離し、Yatagarasu に限定しない |
-| D-021 | 16K を最低候補、32K 以上を推奨として Phase 0 で実測 |
+| D-021 | Codex互換Bundleは16Kを最低保証、32K以上を推奨。8Kは対象外 |
 | D-022 | 用途名付き複数Tokenを持ち、rotate/revokeは対象Tokenだけへ即時適用 |
 | D-023 | livenessとは別に認証対象の`GET /ready`を提供 |
 | D-024 | API errorは英語固定。CLIとマニュアルは英語・日本語を正式対応 |
 | D-025 | Native Tool streamは出力種別確定まで待ち、確定後にstream |
+| D-026 | Phase 0実測に基づくsize・queue・timeout既定値を採用 |
 
 ### D-001 互換性の公称範囲
 
@@ -1060,6 +1061,15 @@ Phase 2 を SSE より先に置く案を推奨する。Codex Agent Compatibility
 
 **決定:** C。環境設定 `RESPONSES_UNKNOWN_FIELD_POLICY` の既定を `compatible` とし、`strict` へ変更可能にする。未知 Input Item は常に reject とし、`ignore-all` は提供しない。
 
+Codex CLI `0.144.5` が通常リクエストでも送信する既知の補助 Tool Type
+`namespace` と `web_search` は、初期版では次のように扱う。
+
+- `compatible`: warning と観測metadataを残して受理し、ローカルモデルへ渡すTool集合から除外する
+- `strict`: `unsupported_tool_type`として明示エラーにする
+
+除外したToolはモデルから選択できない。HoshikageがToolを実行したり、別Toolへ暗黙変換したりしない。
+この例外は検証済みCodex minor系列で観測した既知Typeに限定し、その他の未知Tool Typeは常にrejectする。
+
 **理由:** Codex 更新への耐性と会話意味の保全を両立できる。
 
 ### D-011 LAN 公開時の認証
@@ -1118,14 +1128,23 @@ Phase 2 を SSE より先に置く案を推奨する。Codex Agent Compatibility
 
 ### D-015 初期検証 Model Bundle
 
-**決定:** Native Tool Calling 用と JSON fallback 用の最低 2 Bundle で検証する。具体的なモデル、GPU、context length は Phase 0 の実測対象として記録する。
+**決定:** 標準製品Bundleを`unsloth-gemma4-12b-qat-thinking-off`とし、同じGGUFで
+Native主経路とGeneric JSON fallback経路を個別に強制して検証する。
 
-**推奨:** 最低 2 Bundle。
+物理モデルを2種類必要とはしない。必要なのは次の2 Strategyの独立した契約検証である。
 
-- 1つは `llama-server-native`
-- 1つは `generic-json`
+- `llama-server-native`
+- `generic-json`
 
-**理由:** API 実装と特定モデルの偶然の成功を切り分けられる。
+Qwen3.5-0.8B-Q4をNativeの補助Fixture、LFM2.5-1.2B-Instruct-Q4をGeneric JSON requiredの
+補助Fixtureとして残し、異種chat templateに対するAdapter回帰を行う。LFMのauto Tool選択品質は
+製品保証へ含めない。
+
+標準運用は`mode = native`、`parser = llama-server-native`、`fallback = json`、
+`strict = true`、`repair_invalid_json = true`とする。
+
+**理由:** 標準利用モデルで実際の運用品質を保証しながら、Strategy境界とモデル差の双方を検証できる。
+別モデルへのfallbackはmodel reloadを伴い、Agent Loop内の形式回復として重すぎる。
 
 ### D-016 上位エージェント統合対象 Skill
 
@@ -1197,7 +1216,10 @@ Phase 2 を SSE より先に置く案を推奨する。Codex Agent Compatibility
 
 **推奨:** B を Phase 0 で実測し、正式値を確定する。
 
-**決定:** B。16K を最低候補、32K 以上を推奨値として Phase 0 で実測し、正式な保証値を互換性マトリクスへ記録する。
+**決定:** B。Codex互換Bundleは16Kを最低保証、32K以上を推奨とする。8Kは互換対象外とする。
+Gemma 4 tokenizerで、5 Function Toolを含むCodex初回入力6,871 tokensを実測した。
+32KのGPU VRAMとlatencyはPhase 0環境のCUDAドライバ不整合により未検証であり、
+互換性マトリクスへ制約として記録する。
 
 **理由:** Codex は user prompt より前に instructions と Tool Schema を投入するため、通常チャットで十分な context でも Agent Loop では不足し得る。32K は実用目標として妥当だが、VRAM と KV cache への影響を測定してから最低保証を決める。
 
@@ -1224,6 +1246,32 @@ Phase 2 を SSE より先に置く案を推奨する。Codex Agent Compatibility
 **決定:** Native Tool streamはTextかFunction Callかが確定するまで外部output eventを待ち、確定後にstreamする。確定後に異種出力が混在した場合は成功扱いせずfailureとする。JSON fallbackは全体分類完了までbufferする。
 
 **理由:** TTFTを可能な限り維持しながら、送信済みTextをFunction Callへ変更する不正なResponses遷移を防ぐ。
+
+### D-026 Phase 0 size・queue・timeout既定値
+
+**決定:** Codex CLI `0.144.5`の実測requestと、単一生成・LAN上の少数client利用を前提に、
+次を初期既定値とする。
+
+| 対象 | 既定値 |
+|---|---:|
+| request body | 8 MiB |
+| Tool Schema合計 | 1 MiB |
+| 単一Tool Schema | 256 KiB |
+| Tool数 | 128 |
+| Tool arguments | 64 KiB |
+| Tool Result | 4 MiB |
+| Queue capacity | 4 |
+| Queue timeout | 30秒 |
+| Request timeout | 900秒 |
+| First token timeout | 120秒 |
+| Stream idle timeout | 120秒 |
+| Generation timeout | 600秒 |
+
+Tool Resultは既定では自動切り詰めせず、上限超過を明示エラーとする。Bundleはglobal上限を
+超えない範囲で、Tool argumentsおよびTool Result上限をさらに小さくできる。
+
+**理由:** 実測request bodyは約44KB、Tool Schema全体は約18KBだった。Agent利用に必要な余裕を
+確保しつつ、異常な入力、長時間生成、古いqueue要求による資源占有を有限化する。
 
 ---
 

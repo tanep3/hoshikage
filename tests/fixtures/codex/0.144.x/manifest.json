@@ -1,0 +1,20 @@
+{
+  "fixture_version": 1,
+  "client": {
+    "name": "codex-cli",
+    "version": "0.144.5"
+  },
+  "observed_at": "2026-07-27",
+  "wire_api": "responses",
+  "files": {
+    "text-request.json": "Observed request body with environment-specific text replaced.",
+    "tool-request.json": "Observed first request in a single function-call loop.",
+    "tool-output-request.json": "Observed follow-up request after Codex executed the function.",
+    "expected-text-events.jsonl": "Accepted Responses SSE text sequence emitted by the Phase 0 probe.",
+    "expected-tool-events.jsonl": "Accepted Responses SSE function-call sequence emitted by the Phase 0 probe."
+  },
+  "normalization": [
+    "Model, instructions, prompt cache key, client identifiers, developer context, and environment context were replaced.",
+    "Tool definitions, input item shapes, user probe text, function arguments, and function output shapes were preserved."
+  ]
+}

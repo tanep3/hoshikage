@@ -1,0 +1,25 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\n  \"type\": \"function_call\",\n  \"name\": \"read_file\",\n  \"arguments\": {\n    \"path\": \"README.md\"\n  }\n}"
+      }
+    }
+  ],
+  "model": "LFM2.5-1.2B-Instruct-Q4_K_M",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 37,
+    "prompt_tokens": 34,
+    "total_tokens": 71
+  },
+  "_fixture": {
+    "provenance": "observed-normalized",
+    "llama_server_build": "b10075-76f46ad29",
+    "response_format": "json_schema",
+    "tool_choice_equivalent": "required"
+  }
+}

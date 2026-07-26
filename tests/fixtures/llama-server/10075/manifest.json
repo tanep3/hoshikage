@@ -1,0 +1,33 @@
+{
+  "fixture_version": 1,
+  "server": {
+    "name": "llama-server",
+    "build": "b10075-76f46ad29"
+  },
+  "observed_at": "2026-07-27",
+  "bundles": {
+    "standard": {
+      "name": "unsloth-gemma4-12b-qat-thinking-off",
+      "native": true,
+      "generic_json": true,
+      "minimum_context_tokens": 16384,
+      "recommended_context_tokens": 32768
+    },
+    "native": "Qwen3.5-0.8B-Q4_K_M",
+    "generic_json": "LFM2.5-1.2B-Instruct-Q4_K_M"
+  },
+  "environment": {
+    "backend": "CPU",
+    "reason": "CUDA driver version was insufficient for the installed CUDA runtime"
+  },
+  "notes": [
+    "The standard Gemma 4 bundle passed native call, tool-result continuation, native stream, generic JSON auto selection, and complex JSON argument tests.",
+    "The standard Gemma 4 bundle requires enable_thinking=false to be mapped into the llama-server request.",
+    "Qwen and LFM fixtures are secondary adapter compatibility evidence, not standard production bundles.",
+    "A normal text response and a tool-result continuation were accepted.",
+    "Native non-stream arguments were returned as a JSON string.",
+    "Native stream arguments arrived in arbitrary fragments and usage arrived in a final empty-choices chunk.",
+    "The generic JSON bundle emitted the required function-call schema when the final-answer branch was excluded.",
+    "The malformed fixture is a labeled synthetic mutation used to drive recovery tests."
+  ]
+}

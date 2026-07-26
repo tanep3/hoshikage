@@ -1,0 +1,19 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "OK"
+      }
+    }
+  ],
+  "model": "Qwen3.5-0.8B-Q4_K_M",
+  "object": "chat.completion",
+  "_fixture": {
+    "provenance": "shape-preserving-normalization",
+    "llama_server_build": "b10075-76f46ad29",
+    "note": "Observed response text was normalized because exact wording is model quality, not the adapter contract."
+  }
+}

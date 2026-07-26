@@ -2,10 +2,10 @@
 
 **プロジェクト名:** Hoshikage Codex Agent Compatibility
 **文書種別:** システム設計書
-**版:** 1.0
+**版:** 1.1
 **作成日:** 2026-07-27
 **確定日:** 2026-07-27
-**状態:** システム設計Fix・実装未承認
+**状態:** システム設計Fix・Phase 0完了・Phase 1未承認
 **対応ブランチ:** `feature/codex-agent-compatibility`
 **対応要件:** [codex-agent-compatibility-requirements.md](codex-agent-compatibility-requirements.md)
 
@@ -535,11 +535,16 @@ Wire deserializeは一度`serde_json::Value`としてobject keyを分類して�
 |---|---|---|
 | 既知・対応 | 処理 | 処理 |
 | 既知・意味を変えず無視可能 | warning付き受理 | error |
+| Codex既知・初期未対応の補助Tool | warning付き受理・モデル入力から除外 | error |
 | 既知・会話やTool制御へ影響 | error | error |
 | 未知top-level | warning付き受理 | error |
 | 未知Input Item / Tool Type | error | error |
 
 `#[serde(deny_unknown_fields)]`だけには依存しない。runtime policyとfield分類を共存させるためである。
+
+Codex CLI `0.144.5`については、`namespace`と`web_search`を既知の補助Toolとして登録する。
+compatible時はWire上の存在と除外理由を観測metadataへ残し、`PreparedInferenceRequest.tools`へ
+含めない。strict時は`unsupported_tool_type`を返す。未知Typeを既知補助Toolへ自動昇格させない。
 
 ### 7.3 `previous_response_id`
 
@@ -1489,17 +1494,23 @@ Config
 | Key | Default | 意味 |
 |---|---|---|
 | `RESPONSES_UNKNOWN_FIELD_POLICY` | `compatible` | top-level unknown field |
-| `HOSHIKAGE_MAX_REQUEST_BYTES` | 設計時固定値 | HTTP body上限 |
-| `HOSHIKAGE_RESPONSES_QUEUE_CAPACITY` | 設計時固定値 | 待機request上限 |
-| `HOSHIKAGE_RESPONSES_QUEUE_TIMEOUT_MS` | 設計時固定値 | permit待ち |
-| `HOSHIKAGE_RESPONSES_TIMEOUT_SECS` | 設計時固定値 | request全体deadline |
-| `HOSHIKAGE_FIRST_TOKEN_TIMEOUT_SECS` | 設計時固定値 | upstream受付から最初のdeltaまで |
-| `HOSHIKAGE_STREAM_IDLE_TIMEOUT_SECS` | 設計時固定値 | delta間の最大無通信時間 |
-| `HOSHIKAGE_GENERATION_TIMEOUT_SECS` | 設計時固定値 | 1回の生成上限 |
+| `HOSHIKAGE_MAX_REQUEST_BYTES` | `8388608` | HTTP body上限 |
+| `HOSHIKAGE_MAX_TOOL_SCHEMA_BYTES` | `1048576` | Tool Schema合計上限 |
+| `HOSHIKAGE_MAX_SINGLE_TOOL_SCHEMA_BYTES` | `262144` | 単一Tool Schema上限 |
+| `HOSHIKAGE_MAX_TOOLS` | `128` | Tool数上限 |
+| `HOSHIKAGE_MAX_TOOL_ARGUMENT_BYTES` | `65536` | Function arguments上限 |
+| `HOSHIKAGE_MAX_TOOL_RESULT_BYTES` | `4194304` | Function Call Output上限 |
+| `HOSHIKAGE_RESPONSES_QUEUE_CAPACITY` | `4` | 待機request上限 |
+| `HOSHIKAGE_RESPONSES_QUEUE_TIMEOUT_MS` | `30000` | permit待ち |
+| `HOSHIKAGE_RESPONSES_TIMEOUT_SECS` | `900` | request全体deadline |
+| `HOSHIKAGE_FIRST_TOKEN_TIMEOUT_SECS` | `120` | upstream受付から最初のdeltaまで |
+| `HOSHIKAGE_STREAM_IDLE_TIMEOUT_SECS` | `120` | delta間の最大無通信時間 |
+| `HOSHIKAGE_GENERATION_TIMEOUT_SECS` | `600` | 1回の生成上限 |
 | `HOSHIKAGE_AUTH_TOKEN_FILE` | 標準config directory | Token verifier保存先 |
 | `HOSHIKAGE_DEBUG_CAPTURE` | `off` | 隔離debug capture |
 
-具体的なsizeとtimeout既定値はPhase 0 Fixtureと実機測定後に確定する。未確定値を実装者が独断で埋めない。
+数値はCodex CLI `0.144.5`のPhase 0 FixtureとCPU実機測定に基づく。環境変数で変更できるが、
+不正値を既定値へ黙って戻さない。Bundle固有上限はglobal上限以下でなければならない。
 
 ---
 
@@ -2027,6 +2038,8 @@ mockは`InferenceGateway`のfakeだけで済ませず、HTTP adapter contractも
 
 目的: 実装前に外部契約を固定する。
 
+**状態:** 2026-07-27完了
+
 - Codex CLI `0.144.5` request capture
 - text/Tool/Tool Result/SSE Fixture
 - llama-server build `10075` Chat Tool Calling Fixture
@@ -2041,6 +2054,14 @@ mockは`InferenceGateway`のfakeだけで済ませず、HTTP adapter contractも
 - 正規化済みFixtureがrepositoryへ入る
 - 未確定の数値設定が決まる
 - Codex patch、llama-server build、GPU、Bundleを記録する
+
+成果物:
+
+- `tests/fixtures/codex/0.144.x/`
+- `tests/fixtures/llama-server/10075/`
+- `tests/contract_fixtures.rs`
+- `docs/research/codex-agent-compatibility-phase-0.md`
+- `docs/codex-agent-compatibility-matrix.md`
 
 ### Phase 1: 構造リファクタリング
 

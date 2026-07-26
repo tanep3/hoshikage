@@ -1,0 +1,27 @@
+{
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_fixture_malformed",
+            "type": "function",
+            "function": {
+              "name": "read_file",
+              "arguments": "{\"path\":\"README.md\""
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "_fixture": {
+    "provenance": "synthetic-mutation",
+    "source": "native-tool-response.json",
+    "mutation": "removed final object delimiter from function arguments"
+  }
+}
