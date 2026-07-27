@@ -1068,6 +1068,14 @@ upstreamがusageを返さない場合は、7.4のrendered promptと生成済みo
 
 `llama-server --tools`と`--agent`は起動optionへ追加しない。これはllama-server自身にファイル操作等を許可する別機能であり、Hoshikageの責務境界に反する。
 
+#### 10.2.1 ContextとKVキャッシュ
+
+Model Bundleの`n_ctx`を、Hoshikageのcontext判定とCodexへ生成する`model_context_window`の唯一の基準とする。Codexの`model_auto_compact_token_limit`は実効contextの75%、`tool_output_token_limit`は実効contextの25%または8192 tokensの小さい方とし、上位レイヤーが実容量を過大申告しないようにする。
+
+managed llama-serverのKVキャッシュ型はサーバー運用設定として`HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_K`と`HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_V`から受け取る。未設定時はllama-server既定値を維持し、設定時は許可された型だけを起動引数へ変換する。Draft modelを使用する場合はmain contextと同じK/V型を適用し、mainとdraftで予測不能なVRAM差を作らない。
+
+大きなcontextを有効化する際は、モデル仕様上の最大値だけで決定しない。main model、Vision projector、Draft model、KV cache、CUDA graphを同時に含む実機VRAMを測定し、短い推論とAgent E2Eの双方を通す。12GB級GPU上の標準Gemma Agent Bundleは64K、Q8 KV cache、MTP有効を基準とする。MTPはHoshikageの実用速度を構成する必須能力であり、VRAM不足時に暗黙に無効化してはならない。必要な余裕はKV cache型、同時GPU利用、Bundle構成を明示的に調整して確保する。
+
 ### 10.3 Upstream DTO隔離
 
 `LlamaServerChatRequest`と`LlamaServerChatResponse`は`inference/llama_server`配下だけで公開する。DomainやApplicationから参照しない。

@@ -399,7 +399,7 @@ tool_calling:
 5. `wire_api = "responses"` を設定する。
 6. 認証なしローカル構成では不要な API key を要求しない。
 7. 設定診断は、接続、モデル存在、Responses、streaming、tools の順に原因を切り分ける。
-8. Codex 側の `model_context_window`、`model_auto_compact_token_limit`、`tool_output_token_limit` は Model Bundle の実効値と矛盾しないよう構成する。
+8. Codex 側の `model_context_window`、`model_auto_compact_token_limit`、`tool_output_token_limit` は Model Bundle の実効値と矛盾しないよう構成する。ToolとSkillを常用する標準Agent Bundleは64K contextを基準とする。
 9. reasoning 非対応 Bundle では `model_reasoning_summary = "none"` 等により、Codex が未対応 reasoning output を期待しない構成を提供する。
 10. 対話利用と無人自動実行で、承認方針の異なる Profile を分けられるようにする。
 11. Hoshikage SHALL Codex、Yatagarasu、その他上位アプリケーションが利用する Provider またはモデルを自動選択しない。
@@ -416,8 +416,8 @@ model = "yatagarasu-local"
 model_provider = "hoshikage"
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
-model_context_window = 32768
-model_auto_compact_token_limit = 24576
+model_context_window = 65536
+model_auto_compact_token_limit = 49152
 tool_output_token_limit = 8192
 model_reasoning_summary = "none"
 
@@ -431,6 +431,8 @@ stream_max_retries = 1
 ```
 
 上記 token 値は例であり、設定生成時は対象 Model Bundle の実効 context length に合わせる。無人実行する上位エージェントで `approval_policy = "never"` を使う場合は、一般対話用とは別 Profile とし、対象 workspace と Tool の副作用を限定する。
+
+大きなcontextの運用では、Hoshikageはmanaged llama-serverのK/V cache型を環境設定で選択できなければならない。未設定時は後方互換のためllama-server既定値を使用し、不正な型は起動時エラーとする。標準値の決定はモデル公称上限だけではなく、main model、Vision、Draft modelを含む実機VRAMとAgent E2Eで検証する。標準Gemma Agent BundleではMTPを必須とし、context拡張やVRAM調整を理由に暗黙無効化しない。
 
 実行例:
 

@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn interactive_config_uses_bundle_limits_and_local_provider() {
         let output = render_codex_config(
-            &model(Some(16_384), ToolCallingMode::Native, false),
+            &model(Some(65_536), ToolCallingMode::Native, false),
             &CodexConfigOptions {
                 model: "gemma4".to_string(),
                 mode: CodexProfileMode::Interactive,
@@ -268,9 +268,9 @@ mod tests {
 
         assert!(output.contains("model = \"gemma4\""));
         assert!(output.contains("approval_policy = \"on-request\""));
-        assert!(output.contains("model_context_window = 16384"));
-        assert!(output.contains("model_auto_compact_token_limit = 12288"));
-        assert!(output.contains("tool_output_token_limit = 4096"));
+        assert!(output.contains("model_context_window = 65536"));
+        assert!(output.contains("model_auto_compact_token_limit = 49152"));
+        assert!(output.contains("tool_output_token_limit = 8192"));
         assert!(output.contains("wire_api = \"responses\""));
         assert!(output.contains("requires_openai_auth = false"));
         assert!(output.contains("[sandbox_workspace_write]"));

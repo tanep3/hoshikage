@@ -35,7 +35,9 @@ Hoshikageはこのdirectoryの`.env`を読み込みます。別ファイルを�
 ```dotenv
 HOST=127.0.0.1
 PORT=3030
-N_CTX=16384
+N_CTX=65536
+HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_K=q8_0
+HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_V=q8_0
 HOSHIKAGE_LANG=ja
 ```
 
@@ -46,11 +48,11 @@ HOSHIKAGE_LANG=ja
 ### 2.1 モデル登録
 
 ```bash
-hoshikage add /models/gemma4/model.gguf unsloth-gemma4-12b-qat-thinking-off --n-ctx 16384 --thinking-off
+hoshikage add /models/gemma4/model.gguf unsloth-gemma4-12b-qat-thinking-off --n-ctx 65536 --thinking-off
 hoshikage list --details
 ```
 
-Codex利用の実用下限は16K context、推奨は32Kです。モデルごとの`n_ctx`が未指定の場合は`.env`の`N_CTX`を使います。
+Codex互換判定の下限は16Kですが、ToolやSkillを使う実用的なAgent用途では64Kを推奨します。モデルごとの`n_ctx`が未指定の場合は`.env`の`N_CTX`を使います。KVキャッシュはcontextに応じて増えるため、12GB級GPUでは`HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_K/V=q8_0`を開始点とし、`nvidia-smi`等で実機の余裕を確認してください。
 
 Tool CallingはBundleの`tool_calling`設定を正とします。未設定Bundleは安全側で`disabled`です。`doctor`は候補や矛盾を診断しますが、自動書換えしません。
 
@@ -235,9 +237,9 @@ model = "unsloth-gemma4-12b-qat-thinking-off"
 model_provider = "hoshikage"
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
-model_context_window = 16384
-model_auto_compact_token_limit = 12288
-tool_output_token_limit = 4096
+model_context_window = 65536
+model_auto_compact_token_limit = 49152
+tool_output_token_limit = 8192
 model_reasoning_summary = "none"
 
 [model_providers.hoshikage]

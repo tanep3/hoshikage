@@ -135,3 +135,26 @@ ignored 1件は既存のローカルllama.cpp実体依存probeであり、本Pha
 - View、Recall、Search、Fetchが逐次Agent Loopとして完走する。
 - Hoshikage境界にYatagarasuまたはSkill固有実装が存在しない。
 - 失敗、skip、実機依存の未実施項目を本ログへ明記する。
+
+### Phase 6A Fix後のAgent context是正
+
+- 16K BundleではCodex初期指示とSkill記述だけで約9K tokensを消費し、12Kの自動圧縮閾値へ早期到達することを確認した。
+- Tool結果の4KB制限はHoshikageへ再投入する本文の制御であり、CodexがTool実行直後に見る生出力やモデルcontextの代替ではなかった。
+- 標準`thinking-off`と`thinking-on` Bundleを64Kへ拡張し、Tool結果のhead-tail保持を4KBから16KBへ拡張した。
+- 64K/F16 KV/MTP有効は短いResponses推論に成功したが、RTX 4070 SUPER 12GBで空きVRAMが424MiBしかなく、本番設定として不採用とした。
+- 64K/Q8 KV/MTP有効は空き771MiB、比較用の64K/Q8 KV/MTP無効は空き1208MiBだった。ただしMTPはHoshikage採用価値を構成する必須速度要件であるため、無効構成は不採用とした。標準Agent Bundleは64K/Q8 KV/MTP有効で検証を継続する。
+- managed llama-serverのK/V cache型を型付き環境設定からmain/draft双方へ渡す実装をTDDで追加した。不正値は起動時に拒否し、未設定時は既存挙動を維持する。
+- Yatagarasu Searchはstdoutへ上位10件の構造化JSONだけを返し、ログをstderrへ分離する契約へ変更した。各結果はtitle、URL、500 bytes以下のsnippet、published date、engineを保持し、詳細本文はFetchへ分離する。
+- Hoshikage releaseへ64K/Q8 KV/MTP有効を反映し、実起動引数にmain/draft双方の`--cache-type-*=q8_0`と`--spec-type draft-mtp`が含まれることを確認した。
+- Yatagarasu本番Profileを`model_context_window=65536`、`model_auto_compact_token_limit=49152`、`tool_output_token_limit=8192`へ同期した。
+- 最初に障害となった自然文「明日の埼玉県入間市の天気を教えて。」をthinking-off/onの双方で再実行し、Search 1回、Fetch 1回、最終回答で終了コード0となった。
+- 両セッションともSearchは`returned_results=10`、Codex compactionなし、同一Tool反復なしだった。Hoshikage側は各3 requestをすべて`completed`で終え、最終requestの入力はthinking-off 19235 tokens、thinking-on 19526 tokensだった。
+- 64K/Q8 KV/MTP有効の試験時VRAM空きはWindows側利用量に応じて約466-771MiBで変動した。MTPを維持した上でOOM監視が必要な運用リスクとして残す。
+
+#### 是正中に発生した失敗
+
+- 64K設定後の最初のヘルスチェックはsystemd再起動直後に待機せず実行し、connection refusedとなった。サービスactiveを確認し、待機付き再試験で`{"status":"ok"}`を確認した。
+- standalone llama-cliのメタデータ確認は対話promptが連続出力されtimeoutした。モデル公称値の推測には使わず、managed llama-serverの実ロードとVRAM実測を判断根拠にした。
+- Searchの10件契約REDは、旧scriptが人向けログをstdoutへ混在させていたためJSON decode errorで失敗した。stdout/stderr契約を分離後にPASSした。
+- Yatagarasu全体へ引数なしでpytestを実行した試験は、管理対象外のSemanticMemory submoduleと`python/` import pathを誤収集して2件のcollection errorとなった。正式対象を`PYTHONPATH=python ... pytest python/tests`と明示し、13件PASSを確認した。
+- Yatagarasu本番で最初に`uv run pytest`を実行した試験は、production root環境にpytest executableがなく起動失敗した。既存`python/.venv/bin/pytest`を使って同じ13件を再実行しPASSした。

@@ -261,6 +261,22 @@ fn buffered_completion_actions(completion: ModelCompletion) -> Vec<ModelStreamAc
     }
 }
 
+#[derive(Default)]
+struct NativeAttemptBuffer {
+    actions: Vec<ModelStreamAction>,
+}
+
+impl NativeAttemptBuffer {
+    fn hold(&mut self, actions: Vec<ModelStreamAction>) {
+        self.actions.extend(actions);
+    }
+
+    fn commit(mut self, completion: ModelStreamAction) -> Vec<ModelStreamAction> {
+        self.actions.push(completion);
+        self.actions
+    }
+}
+
 #[derive(Clone, Copy)]
 struct BufferedRetryLimits {
     context_window: u32,
@@ -384,6 +400,62 @@ mod stream_retry_tests {
             &config,
             crate::model::ToolCallingMode::Native,
         ));
+    }
+
+    #[test]
+    fn native_attempt_is_held_until_the_whole_response_is_validated() {
+        let mut buffer = NativeAttemptBuffer::default();
+        let name = crate::conversation::ToolName::new("read_file").unwrap();
+        let usage = TokenUsage::Measured {
+            input_tokens: 1,
+            output_tokens: 1,
+        };
+
+        buffer.hold(vec![
+            ModelStreamAction::BeginFunctionCall { name: name.clone() },
+            ModelStreamAction::AppendArguments("{\"path\":".to_string()),
+        ]);
+        buffer.hold(vec![
+            ModelStreamAction::AppendArguments("\"README.md\"}".to_string()),
+            ModelStreamAction::FinishFunctionCall,
+        ]);
+
+        assert_eq!(
+            buffer.commit(ModelStreamAction::Complete {
+                usage: usage.clone(),
+            }),
+            vec![
+                ModelStreamAction::BeginFunctionCall { name },
+                ModelStreamAction::AppendArguments("{\"path\":".to_string()),
+                ModelStreamAction::AppendArguments("\"README.md\"}".to_string()),
+                ModelStreamAction::FinishFunctionCall,
+                ModelStreamAction::Complete { usage },
+            ]
+        );
+    }
+
+    #[test]
+    fn native_text_is_not_published_before_the_attempt_is_complete() {
+        let mut buffer = NativeAttemptBuffer::default();
+        let usage = TokenUsage::Measured {
+            input_tokens: 1,
+            output_tokens: 1,
+        };
+        buffer.hold(vec![
+            ModelStreamAction::BeginText,
+            ModelStreamAction::AppendText("checking".to_string()),
+        ]);
+
+        assert_eq!(
+            buffer.commit(ModelStreamAction::Complete {
+                usage: usage.clone(),
+            }),
+            vec![
+                ModelStreamAction::BeginText,
+                ModelStreamAction::AppendText("checking".to_string()),
+                ModelStreamAction::Complete { usage },
+            ]
+        );
     }
 }
 
@@ -1685,7 +1757,7 @@ impl ModelManager {
                         tool_config.strict,
                         tool_config.max_argument_bytes,
                     );
-                    let mut emitted_actions = false;
+                    let mut attempt_buffer = NativeAttemptBuffer::default();
                     let mut retry_error = None;
                     'native_stream: loop {
                         let elapsed = started_at.elapsed();
@@ -1707,7 +1779,7 @@ impl ModelManager {
                             Err(error)
                                 if should_retry_stream_semantic_error(
                                     &error,
-                                    emitted_actions,
+                                    false,
                                     &retry_model_config,
                                     mode,
                                 ) =>
@@ -1723,7 +1795,7 @@ impl ModelManager {
                                 Err(error)
                                     if should_retry_stream_semantic_error(
                                         &error,
-                                        emitted_actions,
+                                        false,
                                         &retry_model_config,
                                         mode,
                                     ) =>
@@ -1733,10 +1805,7 @@ impl ModelManager {
                                 }
                                 Err(error) => Err(error)?,
                             };
-                            for action in actions {
-                                emitted_actions = true;
-                                yield action;
-                            }
+                            attempt_buffer.hold(actions);
                         }
                     }
                     if let Some(error) = retry_error {
@@ -1762,7 +1831,10 @@ impl ModelManager {
                         }
                     } else {
                         sse.finish()?;
-                        yield strategy.finish()?;
+                        let completion = strategy.finish()?;
+                        for action in attempt_buffer.commit(completion) {
+                            yield action;
+                        }
                     }
                 }
                 crate::model::ToolCallingMode::Json => {
@@ -2120,6 +2192,8 @@ impl ModelManager {
             alias: model_name.to_string(),
             log_file: Some(log_file),
             sleep_idle_secs: self.config.llama_server_sleep_idle_secs,
+            cache_type_k: self.config.llama_server_cache_type_k,
+            cache_type_v: self.config.llama_server_cache_type_v,
             request: request.clone(),
         };
         let command_spec = LlamaServerCommandSpec::from_launch_config(&launch);
@@ -2143,6 +2217,8 @@ impl ModelManager {
             main = %loaded_info.main_model.display(),
             n_ctx = loaded_info.n_ctx,
             n_gpu_layers = loaded_info.n_gpu_layers,
+            cache_type_k = ?self.config.llama_server_cache_type_k,
+            cache_type_v = ?self.config.llama_server_cache_type_v,
             mmproj = loaded_info.mmproj.as_ref().map(|path| path.display().to_string()),
             draft_model = loaded_info.draft_model.as_ref().map(|path| path.display().to_string()),
             speculation_mode = ?loaded_info.speculation_mode,

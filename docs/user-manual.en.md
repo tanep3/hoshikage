@@ -35,7 +35,9 @@ Hoshikage reads `.env` from this directory. Set `HOSHIKAGE_CONFIG_PATH` to use a
 ```dotenv
 HOST=127.0.0.1
 PORT=3030
-N_CTX=16384
+N_CTX=65536
+HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_K=q8_0
+HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_V=q8_0
 HOSHIKAGE_LANG=ja
 ```
 
@@ -46,11 +48,11 @@ Binding to `HOST=127.0.0.1` or `localhost` allows unauthenticated loopback acces
 ### 2.1 Registering a model
 
 ```bash
-hoshikage add /models/gemma4/model.gguf unsloth-gemma4-12b-qat-thinking-off --n-ctx 16384 --thinking-off
+hoshikage add /models/gemma4/model.gguf unsloth-gemma4-12b-qat-thinking-off --n-ctx 65536 --thinking-off
 hoshikage list --details
 ```
 
-The practical minimum context for Codex is 16K; 32K is recommended. When a model has no explicit `n_ctx`, Hoshikage uses `N_CTX` from `.env`.
+The Codex compatibility floor is 16K, but 64K is recommended for practical agent workloads that use tools and skills. When a model has no explicit `n_ctx`, Hoshikage uses `N_CTX` from `.env`. Because KV cache usage grows with context, start with `HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_K/V=q8_0` on 12 GB-class GPUs and verify the actual headroom with the platform GPU monitor.
 
 The Bundle `tool_calling` setting is authoritative. Bundles without this setting default safely to `disabled`. `doctor` reports candidates and inconsistencies but never rewrites a Bundle.
 
@@ -235,9 +237,9 @@ model = "unsloth-gemma4-12b-qat-thinking-off"
 model_provider = "hoshikage"
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
-model_context_window = 16384
-model_auto_compact_token_limit = 12288
-tool_output_token_limit = 4096
+model_context_window = 65536
+model_auto_compact_token_limit = 49152
+tool_output_token_limit = 8192
 model_reasoning_summary = "none"
 
 [model_providers.hoshikage]

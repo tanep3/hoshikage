@@ -14,6 +14,19 @@ pub enum RuntimeBackendKind {
     LlamaFfi,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvCacheType {
+    F32,
+    F16,
+    Bf16,
+    Q8Zero,
+    Q4Zero,
+    Q4One,
+    Iq4Nl,
+    Q5Zero,
+    Q5One,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub port: u16,
@@ -37,6 +50,8 @@ pub struct Config {
     pub llama_server_port: u16,
     pub llama_server_startup_timeout_secs: u64,
     pub llama_server_sleep_idle_secs: Option<u64>,
+    pub llama_server_cache_type_k: Option<KvCacheType>,
+    pub llama_server_cache_type_v: Option<KvCacheType>,
     pub responses_unknown_field_policy: UnknownFieldPolicy,
     pub max_request_bytes: usize,
     pub max_tool_schema_bytes: usize,
@@ -85,6 +100,8 @@ impl Default for Config {
             llama_server_port: 13030,
             llama_server_startup_timeout_secs: 120,
             llama_server_sleep_idle_secs: None,
+            llama_server_cache_type_k: None,
+            llama_server_cache_type_v: None,
             responses_unknown_field_policy: UnknownFieldPolicy::Compatible,
             max_request_bytes: 8_388_608,
             max_tool_schema_bytes: 1_048_576,
@@ -222,6 +239,14 @@ impl Config {
                     value,
                 )?),
             };
+        }
+        if let Ok(cache_type) = std::env::var("HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_K") {
+            config.llama_server_cache_type_k =
+                KvCacheType::parse_optional("HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_K", &cache_type)?;
+        }
+        if let Ok(cache_type) = std::env::var("HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_V") {
+            config.llama_server_cache_type_v =
+                KvCacheType::parse_optional("HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_V", &cache_type)?;
         }
 
         if let Ok(policy) = std::env::var("RESPONSES_UNKNOWN_FIELD_POLICY") {
@@ -405,6 +430,40 @@ impl RuntimeBackendKind {
     }
 }
 
+impl KvCacheType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::F16 => "f16",
+            Self::Bf16 => "bf16",
+            Self::Q8Zero => "q8_0",
+            Self::Q4Zero => "q4_0",
+            Self::Q4One => "q4_1",
+            Self::Iq4Nl => "iq4_nl",
+            Self::Q5Zero => "q5_0",
+            Self::Q5One => "q5_1",
+        }
+    }
+
+    fn parse_optional(key: &str, value: &str) -> Result<Option<Self>> {
+        match value {
+            "" | "default" | "off" => Ok(None),
+            "f32" => Ok(Some(Self::F32)),
+            "f16" => Ok(Some(Self::F16)),
+            "bf16" => Ok(Some(Self::Bf16)),
+            "q8_0" => Ok(Some(Self::Q8Zero)),
+            "q4_0" => Ok(Some(Self::Q4Zero)),
+            "q4_1" => Ok(Some(Self::Q4One)),
+            "iq4_nl" => Ok(Some(Self::Iq4Nl)),
+            "q5_0" => Ok(Some(Self::Q5Zero)),
+            "q5_1" => Ok(Some(Self::Q5One)),
+            other => Err(crate::error::HoshikageError::ConfigError(format!(
+                "unsupported {key}: {other}"
+            ))),
+        }
+    }
+}
+
 impl UnknownFieldPolicy {
     fn parse(value: &str) -> Result<Self> {
         match value {
@@ -526,6 +585,19 @@ mod validation_tests {
             error,
             crate::error::HoshikageError::ConfigError(_)
         ));
+    }
+
+    #[test]
+    fn kv_cache_types_are_validated_and_normalized() {
+        assert_eq!(
+            KvCacheType::parse_optional("CACHE", "q8_0").unwrap(),
+            Some(KvCacheType::Q8Zero)
+        );
+        assert_eq!(
+            KvCacheType::parse_optional("CACHE", "default").unwrap(),
+            None
+        );
+        assert!(KvCacheType::parse_optional("CACHE", "unknown").is_err());
     }
 
     #[test]

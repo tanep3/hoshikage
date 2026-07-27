@@ -1,7 +1,7 @@
 use super::{ModelDelta, ModelFinishReason, ModelToolSet, TokenUsage, ToolChoice};
 use crate::conversation::{ToolArguments, ToolName};
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ModelStreamAction {
     BeginText,
     AppendText(String),
