@@ -444,7 +444,18 @@ fn normalize_function_call_output(
             message: "function_call_output exceeds the configured size limit".to_string(),
         });
     }
-    let outcome = match object.get("status").and_then(Value::as_str) {
+    let status = object
+        .get("status")
+        .map(|value| {
+            value.as_str().ok_or_else(|| {
+                invalid(
+                    "function_call_output status must be a string",
+                    Some("input"),
+                )
+            })
+        })
+        .transpose()?;
+    let outcome = match status {
         None | Some("completed" | "success") => ToolOutcome::Success(output),
         Some("failed" | "error") => ToolOutcome::Failure(output),
         Some("rejected") => ToolOutcome::Rejected(output),
@@ -892,6 +903,81 @@ mod tests {
             output.outcome,
             ToolOutcome::Success(ref content) if content == "Hoshikage"
         ));
+    }
+
+    #[test]
+    fn function_call_output_status_maps_to_explicit_tool_outcomes() {
+        for (status, expected) in [
+            ("completed", "success"),
+            ("success", "success"),
+            ("failed", "failure"),
+            ("error", "failure"),
+            ("rejected", "rejected"),
+            ("cancelled", "cancelled"),
+        ] {
+            let decoded = decode_request(
+                serde_json::json!({
+                    "model": "gemma4",
+                    "input": [
+                        {
+                            "type": "function_call",
+                            "call_id": "call_1",
+                            "name": "memorize",
+                            "arguments": "{\"text\":\"phase 6B\"}"
+                        },
+                        {
+                            "type": "function_call_output",
+                            "call_id": "call_1",
+                            "status": status,
+                            "output": "tool result"
+                        }
+                    ]
+                }),
+                UnknownFieldPolicy::Compatible,
+            )
+            .unwrap();
+
+            let ConversationItem::FunctionCallOutput(output) = &decoded.conversation.items()[1]
+            else {
+                panic!("second item must be function_call_output");
+            };
+            let actual = match output.outcome {
+                ToolOutcome::Success(_) => "success",
+                ToolOutcome::Failure(_) => "failure",
+                ToolOutcome::Rejected(_) => "rejected",
+                ToolOutcome::Cancelled(_) => "cancelled",
+            };
+            assert_eq!(actual, expected, "status={status}");
+        }
+    }
+
+    #[test]
+    fn non_string_function_call_output_status_is_rejected() {
+        let error = decode_request(
+            serde_json::json!({
+                "model": "gemma4",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "memorize",
+                        "arguments": "{\"text\":\"phase 6B\"}"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "status": 1,
+                        "output": "tool result"
+                    }
+                ]
+            }),
+            UnknownFieldPolicy::Compatible,
+        )
+        .err()
+        .expect("non-string status must fail");
+
+        assert_eq!(error.code, "invalid_request");
+        assert_eq!(error.param.as_deref(), Some("input"));
     }
 
     #[test]

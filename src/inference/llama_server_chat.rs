@@ -252,6 +252,10 @@ mod tests {
     }
 
     fn tool_request() -> ModelRequest {
+        tool_request_with_outcome(ToolOutcome::Success("Hoshikage".to_string()))
+    }
+
+    fn tool_request_with_outcome(outcome: ToolOutcome) -> ModelRequest {
         let call_id = CallId::new("call_previous").unwrap();
         ModelRequest {
             conversation: Conversation::new(vec![
@@ -261,10 +265,7 @@ mod tests {
                     name: ToolName::new("read_file").unwrap(),
                     arguments: ToolArguments::parse(r#"{"path":"README.md"}"#).unwrap(),
                 }),
-                ConversationItem::FunctionCallOutput(FunctionCallOutput {
-                    call_id,
-                    outcome: ToolOutcome::Success("Hoshikage".to_string()),
-                }),
+                ConversationItem::FunctionCallOutput(FunctionCallOutput { call_id, outcome }),
             ]),
             tools: ModelToolSet::new(vec![ModelTool {
                 name: ToolName::new("read_file").unwrap(),
@@ -347,6 +348,48 @@ mod tests {
         assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call_previous");
         assert_eq!(body["messages"][2]["role"], "tool");
         assert_eq!(body["messages"][2]["tool_call_id"], "call_previous");
+    }
+
+    #[test]
+    fn adapter_preserves_side_effect_tool_outcomes_for_model_recovery() {
+        for (outcome, expected) in [
+            (
+                ToolOutcome::Success("saved".to_string()),
+                "saved".to_string(),
+            ),
+            (
+                ToolOutcome::Failure("database unavailable".to_string()),
+                "Tool execution failed:\ndatabase unavailable".to_string(),
+            ),
+            (
+                ToolOutcome::Rejected("user denied".to_string()),
+                "Tool execution was rejected:\nuser denied".to_string(),
+            ),
+            (
+                ToolOutcome::Cancelled("request cancelled".to_string()),
+                "Tool execution was cancelled:\nrequest cancelled".to_string(),
+            ),
+        ] {
+            let request = tool_request_with_outcome(outcome);
+
+            let body = build_chat_request(
+                &ModelId::new("gemma4").unwrap(),
+                &request,
+                &ModelConfig::new_legacy(
+                    "/models".to_string(),
+                    "model.gguf".to_string(),
+                    Vec::new(),
+                ),
+                &LlamaServerChatDefaults {
+                    temperature: 0.2,
+                    top_p: 0.8,
+                    repeat_penalty: 1.1,
+                },
+            )
+            .unwrap();
+
+            assert_eq!(body["messages"][2]["content"], expected);
+        }
     }
 
     #[test]

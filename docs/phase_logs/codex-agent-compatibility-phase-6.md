@@ -2,7 +2,7 @@
 
 ## 2026-07-27
 
-状態: Phase 6A Fix
+状態: Phase 6 Fix
 
 ### 目的
 
@@ -110,11 +110,10 @@ ignored 1件は既存のローカルllama.cpp実体依存probeであり、本Pha
 
 ### 残存事項
 
-- Codex CLI 0.145.0はcustom Providerの`GET /models`へOpenAI公開仕様とは異なる私有`{models:[ModelInfo...]}`を要求し、Hoshikageの標準`{object,data}`にdecode errorを記録する。明示モデルではAgent Loopは継続し、全E2Eは成功した。
+- Codex CLI 0.145.0はcustom Providerの`GET /models`へOpenAI公開仕様とは異なる私有`{models:[ModelInfo...]}`を要求する。Phase 6Bで標準`{object,data}`を維持したままCodex用`models`を併記する後方互換方式へ改訂した。
 - `remote_models = false`はCodex 0.145系で削除済み互換フラグとなり、このrefreshを停止しない。試作設定は撤回した。
-- Hoshikageの標準`/v1/models`をCodex私有schemaへ変更するとOpenAI互換性と責務境界を壊すため行わない。
-- 将来の解消候補は、HoshikageのCodex用モデルカタログを`model_catalog_json`として安全に配置する上位アプリケーション契約である。ただしCodexの完全な`ModelInfo`はbase instructions等のAgent metadataを含むため、Hoshikageが安易に所有しない。Phase 6B前の独立検討事項とする。
-- Doctorの1 warnはcustom model IDがCodex標準`models_cache.json`にないことによる。明示したcontext、compact、tool output制限で実行は継続する。
+- Codex私有metadataは相互運用境界として必要最小限だけ生成し、Bundleのpathや秘密情報は含めない。Agent Loopの基礎指示、context、入力modality、shell利用可否、逐次Tool Call方針を明示する。
+- `custom` Toolは本Phase対象外のため、`apply_patch_tool_type`を広告しない。通常のFunction Toolとshell ToolだけをCodexへ公開する。
 - `codex exec`はProfileが`approval_policy = "on-request"`でも非対話実行表示が`approval: never`となる。副作用系SkillはPhase 6Bで承認境界を別途実機検証する。
 
 ### Phase 6A Fix後の本番障害
@@ -158,3 +157,93 @@ ignored 1件は既存のローカルllama.cpp実体依存probeであり、本Pha
 - Searchの10件契約REDは、旧scriptが人向けログをstdoutへ混在させていたためJSON decode errorで失敗した。stdout/stderr契約を分離後にPASSした。
 - Yatagarasu全体へ引数なしでpytestを実行した試験は、管理対象外のSemanticMemory submoduleと`python/` import pathを誤収集して2件のcollection errorとなった。正式対象を`PYTHONPATH=python ... pytest python/tests`と明示し、13件PASSを確認した。
 - Yatagarasu本番で最初に`uv run pytest`を実行した試験は、production root環境にpytest executableがなく起動失敗した。既存`python/.venv/bin/pytest`を使って同じ13件を再実行しPASSした。
+
+## Phase 6B: 副作用系
+
+状態: Phase 6B Fix
+
+### 開始判断
+
+- 利用者がPhase 6A Fixを承認したため、Phase 6Bを開始した。
+- Yatagarasuの読取系統合はPhase 6Aとして完了している。ただしPhase 6BのMemorize実機試験で上位SkillとSemanticMemoryに未検出障害が見つかったため、書込系まで含む統合完了判定は保留した。
+- Codex公式manualで、対話実行は`approval_policy = "on-request"`、無人実行は承認UIを持たない`codex exec`であることを再確認した。
+
+### Hoshikage実装
+
+- `function_call_output.status`の`completed`、`success`、`failed`、`error`、`rejected`、`cancelled`を型付き`ToolOutcome`へ変換する契約テストを追加した。
+- `status`が数値等の非文字列でも従来は未指定と同じSuccessへ変換されていた。REDで再現し、`invalid_request`として拒否するよう修正した。
+- Success、Failure、Rejected、Cancelledをllama-serverのTool Resultへ意味を保持して再投入する回帰テストを追加した。
+- HoshikageはTool結果本文から成否を推測せず、wire上の明示statusだけを`ToolOutcome`へ変換する責務境界を維持した。
+
+### Codex承認境界
+
+- 対話Profileは`codex --profile <name>`で起動し、Codex UIが承認を表示する。
+- 無人Profileは別名で生成し、`codex exec --profile <unattended-name>`から使用する。
+- `approval_policy = "never"`はsandbox外操作の自動許可ではない。Codexは設定済みsandbox内だけで実行し、境界外操作を失敗としてAgent Loopへ返す。
+- 日本語・英語manualのコマンド、保存先、Windows PowerShell例を同期して修正した。
+
+### Yatagarasu受け入れ修正
+
+- Memorize Skill文書が存在しない裸の`memorize`コマンドを案内し、script自身もhelp例の引用符不正でshell解析に失敗していた。
+- Skill文書をrepository内script pathへ統一し、shell構文テストを追加した。
+- curl HTTP失敗を無言のexit codeとして返していたため、timeout、HTTP error検出、秘密本文を出さない明示エラーを追加した。
+- Skillへ「終了コード0、`status: saved`、保存IDの3点が揃った場合だけ成功」と定義した。
+- 会話自動保存用`bin/memorize.sh`の重複実装137行を廃止し、同じAgentSkill scriptへ委譲した。
+- Codex child processが`.env`を既に読み込んでいる場合、env readerが`set -e`で無言終了する欠陥を、実`.env`を再現するテストで修正した。
+- Yatagarasu mainへ次をcommitし、NAS、GitHub、本番へ順次同期した。
+  - `60705c7 fix: restore Memorize skill execution`
+  - `63c1ce9 fix: make Memorize failures explicit`
+  - `bc093be fix: require verified Memorize execution`
+  - `a226e6e fix: preserve preloaded Memorize environment`
+  - `239ea96 fix: deduplicate repeated Memorize side effects`
+- 同一保存要求がTool待機中に再実行されても副作用を重複させないよう、payload hash、排他lock、60秒の保存ID cacheによる冪等化を追加した。cacheは本文を保持しない。
+- 本番`workspace/.env.example`のWake Word差分は`60705c7`へ正式化し、本番の親repository差分を解消した。
+- 本番で残る`external/SemanticMemory`のmodified表示は、submodule内4ファイルの既存未commit patchである。親repositoryへ混入させず保護している。
+
+### SemanticMemory運用修正
+
+- 要約付き`/api/save`が500となる原因は、設定モデル`gemini-3-flash-preview:cloud`へのOllama generateが410を返すことだった。
+- 本番に存在し、generate成功を確認したローカル`qwen3.5:0.8b`へ要約モデル設定を変更した。
+- 要約付きprobeは保存ID 282を返し、試験後に削除した。
+
+### 実機E2E
+
+| 試験 | 結果 |
+|---|---|
+| Hoshikage Tool outcome全種のwire変換 | PASS |
+| Tool outcome全種のllama-server再投入 | PASS |
+| Yatagarasu Memorize script構文・HTTP失敗 | PASS |
+| SemanticMemory要約付き直接保存 | PASS、ID 282を削除 |
+| thinking-off自然文、会話自動保存なし | FAIL、Tool Callなしで偽成功回答 |
+| thinking-on自然文、会話自動保存なし（env reader修正前） | Tool Call生成、script無言exit 1、最終回答は失敗 |
+| thinking-on自然文、env reader修正後 | Tool Call待機中に同一保存を再実行し、ID 284、285を重複生成。両方削除 |
+| Memorize冪等化後のthinking-on自然文 | FAIL、Tool Callなし、DB保存0件 |
+| thinking-on明示Skill実行、会話自動保存なし | PASS、保存ID 286をDBで1件だけ確認し削除後0件 |
+| unattended workspace外書込拒否 | PASS、workspace内実行証跡を作成後、同一Tool Callの外部file作成だけが失敗。試験証跡を削除 |
+| Codexモデルカタログ読込 | PASS、`/v1/models` decode警告とfallback metadata警告を解消 |
+| モデルカタログ経由Function Tool | PASS、`exec_command`出力`MODEL_CATALOG_TOOL_OK`、最終応答`MODEL_CATALOG_OK` |
+
+thinking-offとthinking-onの双方で、自然な保存依頼からToolを選択しない試行がある。HoshikageのTool変換と明示Skill経路は完走しているため、Provider契約とは分離したモデル選択品質として残る。自動会話保存を有効にした試験結果をMemorize Skill成功と誤認しないよう、最終判定では`YATAGARASU_MEMORY_ENABLED=false`を必須とする。
+
+workspace外書込拒否の初回はfileが作成されなかったがTool実行eventもなく、モデルが実行せず失敗と回答した可能性を排除できなかったため不合格とした。再試験ではworkspace内fileを先に作る同一shell commandを使用し、Tool実行を証明した上で外部fileだけが存在しないことを確認した。
+
+Codexモデルカタログの初回実装は`apply_patch_tool_type=freeform`を過大広告し、Codexが未対応の`custom` Toolを送って`unsupported_tool_type`となった。広告をFunction/shell能力へ限定し、同じ本番経路で再試験して完走した。
+
+### Phase 6B回帰
+
+- Hoshikage `cargo fmt --check`: PASS
+- Hoshikage `cargo clippy --all-targets -- -D warnings`: PASS
+- Hoshikage `cargo test --all-targets`: 234 PASS、1 ignored
+  - unit: 220 PASS、1 ignored
+  - contract fixtures: 12 PASS
+  - manual parity: 2 PASS
+- Yatagarasu `PYTHONPATH=python python/.venv/bin/pytest python/tests`: 16 PASS
+
+既存ignored 1件はローカルllama.cpp実体依存probeであり、Phase 6Bで新規skipしていない。
+
+### Phase 6B残存判断
+
+1. HoshikageのResponses、Function Tool、Tool Result、承認・sandbox境界は実機で成立した。
+2. 明示されたMemorize Skillはthinking-onで実保存まで完走し、重複副作用も防止した。
+3. 自然文だけから副作用Toolを選ぶ確率はthinking-off、thinking-onとも保証できない。明示Skill経路では成功しており毎回失敗するものではないため、Gemma 4のモデル能力制約として利用者が受容した。
+4. 2026-07-27、利用者承認によりPhase 6B Fix。これをもってCodex Agent Compatibility初期実装のPhase 0からPhase 6を完了とする。

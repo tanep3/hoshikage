@@ -299,28 +299,44 @@ mkdir -p ~/.codex
 hoshikage codex-config \
   --model unsloth-gemma4-12b-qat-thinking-off \
   > ~/.codex/hoshikage.config.toml
-codex exec --profile hoshikage "Return exactly the word OK."
+codex --profile hoshikage "Return exactly the word OK."
 ```
 
 On Windows, save the same TOML to `%USERPROFILE%\.codex\hoshikage.config.toml`, then run:
 
 ```powershell
-codex exec --profile hoshikage "Return exactly the word OK."
+codex --profile hoshikage "Return exactly the word OK."
 ```
 
 Codex 0.134 and later do not use the old `[profiles.hoshikage]` form. Use the independent `hoshikage.config.toml` Profile file. For normal Windows Codex app use, prefer the user configuration in section 5.3.
 
 ### 5.6 Interactive and unattended operation
 
-The default interactive configuration uses `approval_policy = "on-request"`. Use the following only for a dedicated unattended environment.
+The default interactive configuration uses `approval_policy = "on-request"`. When you start `codex --profile hoshikage`, Codex's interactive UI lets you approve or reject operations that require permission, such as writes outside the workspace. Codex displays the approval request; Hoshikage does not.
+
+`codex exec` is for non-interactive automation and does not wait for a user-facing approval UI. Create a separately named Profile only for a dedicated unattended environment.
 
 ```bash
+mkdir -p ~/.codex
 hoshikage codex-config \
   --model unsloth-gemma4-12b-qat-thinking-off \
-  --mode unattended
+  --mode unattended \
+  > ~/.codex/hoshikage-unattended.config.toml
+codex exec --profile hoshikage-unattended "Return exactly the word OK."
 ```
 
-The unattended form generates `approval_policy = "never"`. Keep interactive and unattended configurations separate. Hoshikage does not control approvals or sandboxing; Codex does.
+On Windows PowerShell, save and run it as follows:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex"
+hoshikage codex-config `
+  --model unsloth-gemma4-12b-qat-thinking-off `
+  --mode unattended |
+  Set-Content "$env:USERPROFILE\.codex\hoshikage-unattended.config.toml"
+codex exec --profile hoshikage-unattended "Return exactly the word OK."
+```
+
+The unattended form generates `approval_policy = "never"`. This does not automatically permit operations that need approval: Codex runs only within the configured sandbox and returns an out-of-bounds operation to the model as a failure. Keep interactive and unattended configurations separate. Hoshikage does not control approvals or sandboxing; Codex does.
 
 ### 5.7 Configuration concepts
 

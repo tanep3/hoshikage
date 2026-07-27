@@ -299,28 +299,44 @@ mkdir -p ~/.codex
 hoshikage codex-config \
   --model unsloth-gemma4-12b-qat-thinking-off \
   > ~/.codex/hoshikage.config.toml
-codex exec --profile hoshikage "Return exactly the word OK."
+codex --profile hoshikage "Return exactly the word OK."
 ```
 
 Windowsでは`%USERPROFILE%\.codex\hoshikage.config.toml`へ同じTOMLを保存し、PowerShellで次を実行します。
 
 ```powershell
-codex exec --profile hoshikage "Return exactly the word OK."
+codex --profile hoshikage "Return exactly the word OK."
 ```
 
 Codex 0.134以降では、旧形式の`[profiles.hoshikage]`を使いません。Profileごとの独立した`hoshikage.config.toml`を使います。Windows版Codexアプリの通常利用は5.3の利用者設定を推奨します。
 
 ### 5.6 対話用と無人用
 
-標準は対話用で`approval_policy = "on-request"`です。無人実行が必要な専用環境だけで次を使います。
+標準は対話用で`approval_policy = "on-request"`です。`codex --profile hoshikage`で起動すると、workspace外への書込みなど承認が必要な操作をCodexの対話画面で許可または拒否できます。承認はHoshikageではなくCodexが表示します。
+
+`codex exec`は非対話の自動実行用であり、利用者へ承認画面を表示して待つ実行形態ではありません。無人実行が必要な専用環境だけで、対話用とは別名のProfileを作ります。
 
 ```bash
+mkdir -p ~/.codex
 hoshikage codex-config \
   --model unsloth-gemma4-12b-qat-thinking-off \
-  --mode unattended
+  --mode unattended \
+  > ~/.codex/hoshikage-unattended.config.toml
+codex exec --profile hoshikage-unattended "Return exactly the word OK."
 ```
 
-無人用は`approval_policy = "never"`を生成します。対話用設定を無人用へ流用せず、用途と実行環境を分離してください。Hoshikageは承認やsandboxを制御せず、Codex側が制御します。
+Windows PowerShellでは次のように保存して実行します。
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex"
+hoshikage codex-config `
+  --model unsloth-gemma4-12b-qat-thinking-off `
+  --mode unattended |
+  Set-Content "$env:USERPROFILE\.codex\hoshikage-unattended.config.toml"
+codex exec --profile hoshikage-unattended "Return exactly the word OK."
+```
+
+無人用は`approval_policy = "never"`を生成します。承認が必要な操作を自動許可する意味ではなく、Codexが設定済みsandboxの範囲でのみ実行し、境界を越える操作はモデルへ失敗として返します。対話用設定を無人用へ流用せず、用途と実行環境を分離してください。Hoshikageは承認やsandboxを制御せず、Codex側が制御します。
 
 ### 5.7 設定要素の違い
 
