@@ -29,6 +29,15 @@ pub enum HoshikageError {
     #[error("HTTPエラー: {0}")]
     HttpError(#[from] reqwest::Error),
 
+    #[error("server is busy")]
+    ServerBusy,
+
+    #[error("response translation failed")]
+    ResponseTranslationFailed,
+
+    #[error("context length exceeded")]
+    ContextLengthExceeded,
+
     #[error("文字列エラー: {0}")]
     StringError(#[from] NulError),
 

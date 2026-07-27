@@ -12,6 +12,7 @@ Hoshikageの正規ドキュメントと作業記録への入口です。
 4. [Phase 0契約観測報告](research/codex-agent-compatibility-phase-0.md)
 5. [Phase 0作業ログ](phase_logs/codex-agent-compatibility-phase-0.md)
 6. [Phase 1作業ログ](phase_logs/codex-agent-compatibility-phase-1.md)
+7. [Phase 2作業ログ](phase_logs/codex-agent-compatibility-phase-2.md)
 
 要件定義書とシステム設計書を正規仕様とする。`research/`は再利用可能な調査結果、
 `phase_logs/`は実装・テスト・失敗を含む時系列記録である。
@@ -23,4 +24,3 @@ Hoshikageの正規ドキュメントと作業記録への入口です。
 - [非機能要件詳細](nfr-details.md)
 - [Model Runtime Revision 要件](model-runtime-revision-requirements.md)
 - [Model Runtime Revision 設計](model-runtime-revision-system-design.md)
-

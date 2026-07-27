@@ -669,6 +669,13 @@ codex exec --profile yatagarasu-local \
 - モデル推論通信は Hoshikage とローカル `llama-server` の間だけで完結する。
 - Hoshikage ログで request/response の相関を確認できる。
 
+段階判定:
+
+- Phase 2では、同一内容の`stream:false` requestを`POST /v1/responses`へ直接送り、
+  Responses変換とローカル推論経路を検証する。
+- Codex CLI `0.144.5`は通常応答でも`stream:true`を送るため、上記CLIコマンドによる
+  AC-001最終判定はSSEを実装するPhase 4で行う。
+
 ### AC-002 単一 Tool Call
 
 1. Codex が tools 付き request を送信する。
@@ -772,47 +779,60 @@ Yatagarasu の作業ディレクトリで Codex を起動し、ローカルモ�
 - llama-server native Tool Calling 能力確認
 - 最初に使う Model Bundle の選定
 
-### Phase 1: 非ストリーム Text
+### Phase 1: 構造リファクタリング
 
-- `/v1/responses`
-- input/instructions 変換
+- Wire非依存のConversation・推論契約
+- Model Registry
+- Runtime Coordinator・Lease
+- managed llama-server Adapter
+- Config・認証・Token安全基盤
+- 既存Chat characterization test
+
+### Phase 2: 非ストリームText
+
+- `POST /v1/responses`
+- input/instructions変換
 - output message
-- usage/error
-- Tool なし
+- usage/error/timeout
+- `/v1/capabilities`
+- `/health`と`/ready`
+- Toolなし
 
-### Phase 2: 非ストリーム Tool Loop
+### Phase 3: 非ストリームTool Loop
 
 - tools/tool_choice
-- 単一 `function_call`
+- Native/JSON Strategy
+- 単一`function_call`
 - `function_call_output`
 - 手動履歴再投入
-- invalid Tool Call
+- invalid Tool Call回復
 
-### Phase 3: SSE
+### Phase 4: SSE
 
 - text delta
 - function arguments delta
 - terminal/error event
 - disconnect/cancellation
+- Codex CLIによるAC-001最終判定
 
-### Phase 4: Codex Agent Loop
+### Phase 5: 運用完成
 
-- 複数ターン
-- 複数ステップ
-- queue/retry/timeout
-- context/Tool Result 制御
-- Codex compatibility matrix
+- Codex config/catalog
+- Capability/Doctor拡張
+- Observability/Redaction
+- 英語・日本語CLI表示
+- 英語・日本語ユーザーマニュアル
 
-### Phase 5: 上位エージェント統合
+### Phase 6: 上位エージェント統合
 
-#### Phase 5A: 読取系
+#### Phase 6A: 読取系
 
 - Yatagarasu を最初の統合対象とする
 - 対話用 Profile
 - View / Recall / Search / Fetch
 - read-only end-to-end test
 
-#### Phase 5B: 副作用系
+#### Phase 6B: 副作用系
 
 - 無人実行用 Profile と承認境界
 - Memorize 等の書込 Tool
@@ -821,7 +841,7 @@ Yatagarasu の作業ディレクトリで Codex を起動し、ローカルモ�
 
 Hoshikage の Provider 境界は Yatagarasu に限定しない。OpenClaw 等の別上位エージェントとの将来接続を妨げないが、初期互換性保証は Codex CLI 実機試験に基づく。
 
-### Phase 6: 高度機能
+### Phase 7: 高度機能
 
 - Vision `input_image`
 - 並列 Tool Call
@@ -829,7 +849,8 @@ Hoshikage の Provider 境界は Yatagarasu に限定しない。OpenClaw 等の
 - stateful Responses
 - モデル能力自動検出の高度化
 
-Phase 2 を SSE より先に置く案を推奨する。Codex Agent Compatibility の価値は Tool Loop にあり、まず非ストリームで意味変換を検証した方が、SSE の event 不具合とモデル方言の不具合を分離できるためである。
+Phase 2の非ストリームText、Phase 3のTool意味変換、Phase 4のSSEを分離する。
+これによりWire変換、モデル方言、event sequenceの不具合を別々に検出できる。
 
 ---
 

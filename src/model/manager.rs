@@ -2,9 +2,10 @@ use crate::config::{Config, RuntimeBackendKind};
 use crate::error::Result;
 use crate::inference::llama_wrapper::InferenceParams;
 use crate::inference::{
-    LlamaFfiBackend, LlamaLoadRequest, LlamaServerClient, LlamaServerCommandSpec,
-    LlamaServerLaunchConfig, LlamaServerProcess, LoadedRuntimeInfo, RuntimeBackend,
-    ThinkingController, ThinkingStreamFilter,
+    build_text_request, parse_text_response, LlamaFfiBackend, LlamaLoadRequest, LlamaServerClient,
+    LlamaServerCommandSpec, LlamaServerLaunchConfig, LlamaServerProcess, LlamaServerTextDefaults,
+    LoadedRuntimeInfo, ModelCompletion, ModelRequest, RuntimeBackend, ThinkingController,
+    ThinkingStreamFilter, TokenUsage,
 };
 use crate::runtime::{RuntimeCoordinator, RuntimeEndpoint, RuntimeLease};
 use serde::{Deserialize, Serialize};
@@ -186,6 +187,13 @@ fn ensure_ramdisk_capacity(path: &std::path::Path, required_bytes: u64) -> Resul
             "RAM disk capacity is insufficient: required {} bytes, available {} bytes",
             required_bytes, available
         )));
+    }
+    Ok(())
+}
+
+fn validate_output_token_limit(max_output_tokens: u32, n_ctx: u32) -> Result<()> {
+    if max_output_tokens > n_ctx {
+        return Err(crate::error::HoshikageError::ContextLengthExceeded);
     }
     Ok(())
 }
@@ -432,6 +440,15 @@ impl ModelConfig {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[test]
+    fn output_token_limit_cannot_exceed_model_context() {
+        assert!(validate_output_token_limit(4096, 4096).is_ok());
+        assert!(matches!(
+            validate_output_token_limit(4097, 4096),
+            Err(crate::error::HoshikageError::ContextLengthExceeded)
+        ));
+    }
 
     #[test]
     fn legacy_model_config_deserializes_from_path() {
@@ -819,6 +836,22 @@ impl ModelManager {
         self.config.runtime_backend == RuntimeBackendKind::LlamaServerManaged
     }
 
+    pub fn responses_unknown_field_policy(&self) -> crate::config::UnknownFieldPolicy {
+        self.config.responses_unknown_field_policy
+    }
+
+    pub fn max_request_bytes(&self) -> usize {
+        self.config.max_request_bytes
+    }
+
+    pub fn responses_timeout_secs(&self) -> u64 {
+        self.config.responses_timeout_secs
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.config.validate().is_ok() && self.managed_runtime.phase().is_ok()
+    }
+
     pub async fn acquire_managed_llama_server(&self, model_name: &str) -> Result<RuntimeLease> {
         self.reconcile_managed_runtime_state()?;
         let model_id = crate::conversation::ModelId::new(model_name).map_err(|error| {
@@ -833,7 +866,13 @@ impl ModelManager {
             .managed_runtime
             .prepare(model_id, request_id)
             .await
-            .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))?;
+            .map_err(|error| match error {
+                crate::runtime::RuntimeAcquireError::ServerBusy
+                | crate::runtime::RuntimeAcquireError::QueueTimeout => {
+                    crate::error::HoshikageError::ServerBusy
+                }
+                other => crate::error::HoshikageError::Other(other.to_string()),
+            })?;
         let model_config = self.get_model(model_name).await?;
         let endpoint = self.llama_server_base_url();
         let mut started = false;
@@ -1101,6 +1140,108 @@ impl ModelManager {
         state.last_access = Instant::now();
 
         Ok((output, prompt_tokens, completion_tokens))
+    }
+
+    pub async fn complete_model_request(
+        &self,
+        model: &crate::conversation::ModelId,
+        request: ModelRequest,
+    ) -> Result<ModelCompletion> {
+        let model_config = self.get_model(model.as_str()).await?;
+        validate_output_token_limit(
+            request.max_output_tokens,
+            model_config.n_ctx.unwrap_or(self.config.n_ctx),
+        )?;
+        if self.uses_managed_llama_server() {
+            let body = build_text_request(
+                model,
+                &request,
+                &model_config,
+                &LlamaServerTextDefaults {
+                    temperature: self.default_temperature(),
+                    top_p: self.default_top_p(),
+                    repeat_penalty: self.default_repeat_penalty(),
+                },
+            )?;
+            let lease = self.acquire_managed_llama_server(model.as_str()).await?;
+            let upstream = match self.send_managed_chat(&lease, &body).await {
+                Ok(response) => response,
+                Err(error) => {
+                    self.mark_managed_lease_unhealthy(
+                        model.as_str(),
+                        &lease,
+                        format!("Responses upstream request failed: {error}"),
+                    );
+                    return Err(error.into());
+                }
+            };
+            if !upstream.status().is_success() {
+                let status = upstream.status();
+                if let Err(error) = lease.finish() {
+                    tracing::warn!(
+                        model = model.as_str(),
+                        error = %error,
+                        "Failed to finish runtime lease after upstream HTTP error"
+                    );
+                }
+                return Err(crate::error::HoshikageError::InferenceError(format!(
+                    "llama-server returned HTTP {status}"
+                )));
+            }
+            let bytes = match upstream.bytes().await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.mark_managed_lease_unhealthy(
+                        model.as_str(),
+                        &lease,
+                        format!("Responses upstream body failed: {error}"),
+                    );
+                    return Err(error.into());
+                }
+            };
+            let completion = parse_text_response(&bytes)?;
+            lease
+                .finish()
+                .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))?;
+            return Ok(completion);
+        }
+
+        let messages = request
+            .conversation
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                crate::conversation::ConversationItem::Message(message) => Some(message.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let prompt = self.build_prompt(model.as_str(), &messages).await?;
+        let params = InferenceParams {
+            temperature: request
+                .sampling
+                .temperature
+                .unwrap_or(self.default_temperature()),
+            top_p: request.sampling.top_p.unwrap_or(self.default_top_p()),
+            max_tokens: request.max_output_tokens.min(i32::MAX as u32) as i32,
+            stop_sequences: model_config.stop,
+            presence_penalty: request.sampling.presence_penalty.unwrap_or(0.0),
+            frequency_penalty: request.sampling.frequency_penalty.unwrap_or(0.0),
+            repeat_penalty: self.default_repeat_penalty(),
+            repeat_last_n: self.default_repeat_last_n() as usize,
+            diffusion_steps: None,
+            diffusion_algorithm: None,
+            diffusion_schedule: None,
+            diffusion_cfg_scale: None,
+        };
+        let (content, input_tokens, output_tokens) =
+            self.generate(model.as_str(), &prompt, params).await?;
+        Ok(ModelCompletion::Text {
+            content,
+            usage: TokenUsage::Measured {
+                input_tokens,
+                output_tokens,
+            },
+        })
     }
 
     pub async fn build_prompt(

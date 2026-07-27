@@ -5,7 +5,7 @@
 **版:** 1.1
 **作成日:** 2026-07-27
 **確定日:** 2026-07-27
-**状態:** システム設計Fix・Phase 0完了・Phase 1 Fix・Phase 2実装中
+**状態:** システム設計Fix・Phase 0完了・Phase 1 Fix・Phase 2 Fix
 **対応ブランチ:** `feature/codex-agent-compatibility`
 **対応要件:** [codex-agent-compatibility-requirements.md](codex-agent-compatibility-requirements.md)
 
@@ -2101,9 +2101,14 @@ mockは`InferenceGateway`のfakeだけで済ませず、HTTP adapter contractも
 
 完了条件:
 
-- AC-001
+- 標準Bundleへ`stream:false`の通常Responses requestを直接送り、`OK`を得る
+- 推論通信がHoshikageとローカル`llama-server`内で完結する
 - Responses変換p95計測
 - Chat回帰成功
+
+Codex CLI `0.144.5`は通常応答でも`stream:true`を送る。したがって、Codex CLIを使う
+AC-001最終判定はSSEを実装するPhase 4で行い、Phase 2では同等の非ストリームrequestを
+直接APIへ送ってProvider境界を検証する。
 
 ### Phase 3: 非ストリームTool Loop
 
@@ -2132,7 +2137,7 @@ mockは`InferenceGateway`のfakeだけで済ませず、HTTP adapter contractも
 
 完了条件:
 
-- AC-005
+- AC-001、AC-005
 - terminal event最大1回
 - disconnect後にLease/permitが残らない
 
