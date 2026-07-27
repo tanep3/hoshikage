@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::error::Result;
+use crate::i18n::{Language, LocalizedText};
 use crate::inference::{CapabilityStatus, LlamaServerRuntimeReport, RuntimeCapabilityReport};
 use crate::model::{FallbackMode, ModelConfig};
 use serde::Serialize;
@@ -14,12 +15,12 @@ enum DiagnosticStatus {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 struct DiagnosticCheck {
     id: String,
     status: DiagnosticStatus,
-    message: String,
-    remediation: Option<String>,
+    message: LocalizedText,
+    remediation: Option<LocalizedText>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -30,7 +31,7 @@ struct DiagnosticSummary {
     error: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 struct DoctorReport {
     summary: DiagnosticSummary,
     llama_cpp_runtime_dir: String,
@@ -40,7 +41,185 @@ struct DoctorReport {
     checks: Vec<DiagnosticCheck>,
 }
 
-pub async fn doctor(model: Option<String>, json: bool) -> Result<()> {
+#[derive(Serialize)]
+struct DiagnosticCheckWire<'a> {
+    id: &'a str,
+    status: DiagnosticStatus,
+    message_key: String,
+    remediation_key: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DoctorReportWire<'a> {
+    summary: &'a DiagnosticSummary,
+    llama_cpp_runtime_dir: &'a str,
+    llama_server_path: &'a str,
+    libllama_path: &'a str,
+    model: Option<&'a str>,
+    checks: Vec<DiagnosticCheckWire<'a>>,
+}
+
+impl DoctorReport {
+    fn wire(&self) -> DoctorReportWire<'_> {
+        DoctorReportWire {
+            summary: &self.summary,
+            llama_cpp_runtime_dir: &self.llama_cpp_runtime_dir,
+            llama_server_path: &self.llama_server_path,
+            libllama_path: &self.libllama_path,
+            model: self.model.as_deref(),
+            checks: self
+                .checks
+                .iter()
+                .map(|check| DiagnosticCheckWire {
+                    id: &check.id,
+                    status: check.status,
+                    message_key: format!("doctor.{}.message", check.id),
+                    remediation_key: check
+                        .remediation
+                        .as_ref()
+                        .map(|_| format!("doctor.{}.remediation", check.id)),
+                })
+                .collect(),
+        }
+    }
+}
+
+fn text(en: impl Into<String>, ja: impl Into<String>) -> LocalizedText {
+    LocalizedText::new(en, ja)
+}
+
+#[derive(Debug, Clone)]
+struct CodexEndpointSnapshot {
+    model_found: bool,
+    responses: bool,
+    streaming: bool,
+    tools: bool,
+    codex_compatible: bool,
+}
+
+fn codex_capability_checks(snapshot: &CodexEndpointSnapshot) -> Vec<DiagnosticCheck> {
+    let dependent_status = |available: bool, optional: bool| {
+        if !snapshot.model_found {
+            DiagnosticStatus::Error
+        } else if available {
+            DiagnosticStatus::Ok
+        } else if optional {
+            DiagnosticStatus::Warn
+        } else {
+            DiagnosticStatus::Error
+        }
+    };
+    vec![
+        DiagnosticCheck {
+            id: "codex.connection".to_string(),
+            status: DiagnosticStatus::Ok,
+            message: text(
+                "The Hoshikage API is reachable",
+                "Hoshikage APIへ接続できます",
+            ),
+            remediation: None,
+        },
+        DiagnosticCheck {
+            id: "codex.model".to_string(),
+            status: if snapshot.model_found {
+                DiagnosticStatus::Ok
+            } else {
+                DiagnosticStatus::Error
+            },
+            message: if snapshot.model_found {
+                text(
+                    "The requested model is registered",
+                    "指定モデルが登録されています",
+                )
+            } else {
+                text(
+                    "The requested model is not registered",
+                    "指定モデルが登録されていません",
+                )
+            },
+            remediation: (!snapshot.model_found).then(|| {
+                text(
+                    "Run codex-model-catalog to list available models",
+                    "codex-model-catalogで利用可能なモデルを確認してください",
+                )
+            }),
+        },
+        DiagnosticCheck {
+            id: "codex.responses".to_string(),
+            status: dependent_status(snapshot.responses, false),
+            message: text(
+                "Responses API capability was checked",
+                "Responses API capabilityを確認しました",
+            ),
+            remediation: (!snapshot.responses).then(|| {
+                text(
+                    "Use a Responses-capable bundle with managed llama-server",
+                    "Responses対応Bundleとmanaged llama-serverを使用してください",
+                )
+            }),
+        },
+        DiagnosticCheck {
+            id: "codex.streaming".to_string(),
+            status: dependent_status(snapshot.streaming, false),
+            message: text(
+                "Responses streaming capability was checked",
+                "Responses streaming capabilityを確認しました",
+            ),
+            remediation: (!snapshot.streaming).then(|| {
+                text(
+                    "Use a Hoshikage version that supports streaming",
+                    "streaming対応のHoshikage versionを使用してください",
+                )
+            }),
+        },
+        DiagnosticCheck {
+            id: "codex.tools".to_string(),
+            status: dependent_status(snapshot.tools, true),
+            message: if snapshot.tools {
+                text("Tool Calling is enabled", "Tool Callingが有効です")
+            } else {
+                text(
+                    "Tool Calling is disabled; only text responses are available",
+                    "Tool Callingが無効なためテキスト応答だけ利用できます",
+                )
+            },
+            remediation: (!snapshot.tools).then(|| {
+                text(
+                    "Check the bundle tool_calling configuration",
+                    "Bundleのtool_calling設定を診断してください",
+                )
+            }),
+        },
+        DiagnosticCheck {
+            id: "codex.context".to_string(),
+            status: dependent_status(snapshot.codex_compatible, true),
+            message: if snapshot.codex_compatible {
+                text(
+                    "The model meets the minimum Codex context size",
+                    "Codex用context下限を満たしています",
+                )
+            } else {
+                text(
+                    "The model does not meet the 16K minimum Codex context size",
+                    "Codex用context下限16Kを満たしていません",
+                )
+            },
+            remediation: (!snapshot.codex_compatible).then(|| {
+                text(
+                    "Set the bundle n_ctx to at least 16384",
+                    "Bundleのn_ctxを16384以上に設定してください",
+                )
+            }),
+        },
+    ]
+}
+
+pub async fn doctor(
+    model: Option<String>,
+    json: bool,
+    codex_base_url: Option<String>,
+    language: Language,
+) -> Result<()> {
     let config = Config::load()?;
     let server_report = LlamaServerRuntimeReport::probe(config.llama_cpp_runtime_dir()?);
     let libllama_path = resolve_runtime_libllama_path(&config, &server_report)?;
@@ -57,11 +236,14 @@ pub async fn doctor(model: Option<String>, json: bool) -> Result<()> {
             checks.push(DiagnosticCheck {
                 id: "runtime.libllama.load".to_string(),
                 status: DiagnosticStatus::Error,
-                message: format!("libllama を読み込めません: {}", e),
-                remediation: Some(
-                    "HOSHIKAGE_LLAMA_CPP_RUNTIME_DIR または HOSHIKAGE_LIB_PATH の配置を確認してください"
-                        .to_string(),
+                message: text(
+                    format!("Could not load libllama: {e}"),
+                    format!("libllama を読み込めません: {e}"),
                 ),
+                remediation: Some(text(
+                    "Check HOSHIKAGE_LLAMA_CPP_RUNTIME_DIR or HOSHIKAGE_LIB_PATH",
+                    "HOSHIKAGE_LLAMA_CPP_RUNTIME_DIR または HOSHIKAGE_LIB_PATH の配置を確認してください",
+                )),
             });
             None
         }
@@ -69,6 +251,9 @@ pub async fn doctor(model: Option<String>, json: bool) -> Result<()> {
 
     if let Some(model_name) = &model {
         checks.extend(model_checks(&config, model_name, runtime_report.as_ref())?);
+        if let Some(base_url) = &codex_base_url {
+            checks.extend(codex_endpoint_checks(base_url, model_name).await);
+        }
     }
 
     let report = DoctorReport {
@@ -81,15 +266,196 @@ pub async fn doctor(model: Option<String>, json: bool) -> Result<()> {
     };
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        println!("{}", serde_json::to_string_pretty(&report.wire())?);
     } else {
-        print_report(&report);
+        print_report(&report, language);
     }
 
     Ok(())
 }
 
-pub fn check_candidate_model(model_name: &str, model_config: &ModelConfig) -> Result<bool> {
+async fn codex_endpoint_checks(base_url: &str, model: &str) -> Vec<DiagnosticCheck> {
+    let Ok(base_url) = reqwest::Url::parse(base_url) else {
+        return vec![codex_connection_error(
+            text(
+                "The Codex provider base URL is invalid",
+                "Codex provider base URLが正しくありません",
+            ),
+            text(
+                "Specify an absolute URL such as http://127.0.0.1:3030/v1",
+                "http://127.0.0.1:3030/v1のような絶対URLを指定してください",
+            ),
+        )];
+    };
+    if !matches!(base_url.scheme(), "http" | "https") || base_url.host_str().is_none() {
+        return vec![codex_connection_error(
+            text(
+                "The Codex provider base URL is invalid",
+                "Codex provider base URLが正しくありません",
+            ),
+            text(
+                "Specify an absolute URL such as http://127.0.0.1:3030/v1",
+                "http://127.0.0.1:3030/v1のような絶対URLを指定してください",
+            ),
+        )];
+    }
+    let client = reqwest::Client::new();
+    let mut health_url = base_url.clone();
+    health_url.set_path("/health");
+    health_url.set_query(None);
+    health_url.set_fragment(None);
+    match client.get(health_url).send().await {
+        Ok(response) if response.status().is_success() => {}
+        Ok(response) => {
+            return vec![codex_connection_error(
+                text(
+                    format!(
+                        "The Hoshikage health check returned HTTP {}",
+                        response.status()
+                    ),
+                    format!(
+                        "Hoshikage health checkがHTTP {}を返しました",
+                        response.status()
+                    ),
+                ),
+                text(
+                    "Check the Hoshikage bind address, port, and process state",
+                    "Hoshikageのbind address、port、process状態を確認してください",
+                ),
+            )];
+        }
+        Err(_) => {
+            return vec![codex_connection_error(
+                text(
+                    "Could not connect to the Hoshikage API",
+                    "Hoshikage APIへ接続できません",
+                ),
+                text(
+                    "Check that Hoshikage is running and verify its bind address, port, and firewall",
+                    "Hoshikageの起動、bind address、port、firewallを確認してください",
+                ),
+            )];
+        }
+    }
+
+    let mut model_url = base_url;
+    if !model_url.path().ends_with('/') {
+        let path = format!("{}/", model_url.path());
+        model_url.set_path(&path);
+    }
+    let Ok(mut segments) = model_url.path_segments_mut() else {
+        return vec![codex_connection_error(
+            text(
+                "Could not append the API path to the Codex provider base URL",
+                "Codex provider base URLへAPI pathを追加できません",
+            ),
+            text(
+                "Use a base URL in the form http://HOST:PORT/v1",
+                "base URLをhttp://HOST:PORT/v1形式で指定してください",
+            ),
+        )];
+    };
+    segments.pop_if_empty();
+    segments.push("hoshikage");
+    segments.push("models");
+    segments.push(model);
+    drop(segments);
+
+    let mut request = client.get(model_url);
+    if let Ok(token) = std::env::var("HOSHIKAGE_API_KEY") {
+        if !token.is_empty() {
+            request = request.bearer_auth(token);
+        }
+    }
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(_) => {
+            return vec![codex_connection_error(
+                text(
+                    "Could not connect to the model capability API",
+                    "モデル能力APIへ接続できません",
+                ),
+                text(
+                    "Check the base URL and network",
+                    "base URLとnetworkを確認してください",
+                ),
+            )];
+        }
+    };
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return vec![codex_connection_error(
+            text(
+                "Authentication to the model capability API failed",
+                "モデル能力APIの認証に失敗しました",
+            ),
+            text(
+                "Set a named token in HOSHIKAGE_API_KEY",
+                "HOSHIKAGE_API_KEYへ用途名付きTokenを設定してください",
+            ),
+        )];
+    }
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return codex_capability_checks(&CodexEndpointSnapshot {
+            model_found: false,
+            responses: false,
+            streaming: false,
+            tools: false,
+            codex_compatible: false,
+        });
+    }
+    if !response.status().is_success() {
+        return vec![codex_connection_error(
+            text(
+                format!(
+                    "The model capability API returned HTTP {}",
+                    response.status()
+                ),
+                format!("モデル能力APIがHTTP {}を返しました", response.status()),
+            ),
+            text(
+                "Check the Hoshikage logs and API version",
+                "HoshikageのログとAPI versionを確認してください",
+            ),
+        )];
+    }
+    let model = match response.json::<crate::model::HoshikageModelInfo>().await {
+        Ok(model) => model,
+        Err(_) => {
+            return vec![codex_connection_error(
+                text(
+                    "Could not decode the model capability API response",
+                    "モデル能力APIの応答を解釈できません",
+                ),
+                text(
+                    "Use matching Hoshikage server and CLI versions",
+                    "HoshikageとCLIのversionを揃えてください",
+                ),
+            )];
+        }
+    };
+    codex_capability_checks(&CodexEndpointSnapshot {
+        model_found: true,
+        responses: model.responses,
+        streaming: model.streaming,
+        tools: model.tools,
+        codex_compatible: model.codex_compatible,
+    })
+}
+
+fn codex_connection_error(message: LocalizedText, remediation: LocalizedText) -> DiagnosticCheck {
+    DiagnosticCheck {
+        id: "codex.connection".to_string(),
+        status: DiagnosticStatus::Error,
+        message,
+        remediation: Some(remediation),
+    }
+}
+
+pub fn check_candidate_model(
+    model_name: &str,
+    model_config: &ModelConfig,
+    language: Language,
+) -> Result<bool> {
     let config = Config::load()?;
     let server_report = LlamaServerRuntimeReport::probe(config.llama_cpp_runtime_dir()?);
     let libllama_path = resolve_runtime_libllama_path(&config, &server_report)?;
@@ -104,11 +470,14 @@ pub fn check_candidate_model(model_name: &str, model_config: &ModelConfig) -> Re
         checks.push(DiagnosticCheck {
             id: "runtime.libllama.load".to_string(),
             status: DiagnosticStatus::Error,
-            message: format!("libllama を読み込めません: {}", libllama_path.display()),
-            remediation: Some(
-                "HOSHIKAGE_LLAMA_CPP_RUNTIME_DIR または HOSHIKAGE_LIB_PATH の配置を確認してください"
-                    .to_string(),
+            message: text(
+                format!("Could not load libllama: {}", libllama_path.display()),
+                format!("libllama を読み込めません: {}", libllama_path.display()),
             ),
+            remediation: Some(text(
+                "Check HOSHIKAGE_LLAMA_CPP_RUNTIME_DIR or HOSHIKAGE_LIB_PATH",
+                "HOSHIKAGE_LLAMA_CPP_RUNTIME_DIR または HOSHIKAGE_LIB_PATH の配置を確認してください",
+            )),
         });
     }
     checks.extend(model_config_checks(model_config, runtime_report.as_ref()));
@@ -121,7 +490,7 @@ pub fn check_candidate_model(model_name: &str, model_config: &ModelConfig) -> Re
         model: Some(model_name.to_string()),
         checks,
     };
-    print_report(&report);
+    print_report(&report, language);
 
     Ok(report.summary.error == 0)
 }
@@ -238,9 +607,15 @@ fn optional_adapter_file_check(path: &Path) -> DiagnosticCheck {
         DiagnosticCheck {
             id: "runtime.speculation_adapter.path".to_string(),
             status: DiagnosticStatus::Ok,
-            message: format!(
-                "Hoshikage speculation adapter が見つかります: {}",
-                path.display()
+            message: text(
+                format!(
+                    "The Hoshikage speculation adapter is available: {}",
+                    path.display()
+                ),
+                format!(
+                    "Hoshikage speculation adapter が見つかります: {}",
+                    path.display()
+                ),
             ),
             remediation: None,
         }
@@ -248,13 +623,20 @@ fn optional_adapter_file_check(path: &Path) -> DiagnosticCheck {
         DiagnosticCheck {
             id: "runtime.speculation_adapter.path".to_string(),
             status: DiagnosticStatus::Warn,
-            message: format!(
-                "Hoshikage speculation adapter が見つかりません: {}",
-                path.display()
+            message: text(
+                format!(
+                    "The Hoshikage speculation adapter is missing: {}",
+                    path.display()
+                ),
+                format!(
+                    "Hoshikage speculation adapter が見つかりません: {}",
+                    path.display()
+                ),
             ),
-            remediation: Some(
-                "MTP / Draft の実速度化には Hoshikage 用 adapter を配置してください".to_string(),
-            ),
+            remediation: Some(text(
+                "Install the Hoshikage adapter to accelerate MTP / Draft inference",
+                "MTP / Draft の実速度化には Hoshikage 用 adapter を配置してください",
+            )),
         }
     }
 }
@@ -271,11 +653,17 @@ fn model_checks(
         checks.push(DiagnosticCheck {
             id: "model.map.exists".to_string(),
             status: DiagnosticStatus::Error,
-            message: format!(
-                "model_map.json が見つかりません: {}",
-                model_map_path.display()
+            message: text(
+                format!("model_map.json is missing: {}", model_map_path.display()),
+                format!(
+                    "model_map.json が見つかりません: {}",
+                    model_map_path.display()
+                ),
             ),
-            remediation: Some("hoshikage add でモデルを登録してください".to_string()),
+            remediation: Some(text(
+                "Register a model with hoshikage add",
+                "hoshikage add でモデルを登録してください",
+            )),
         });
         return Ok(checks);
     }
@@ -286,10 +674,14 @@ fn model_checks(
         checks.push(DiagnosticCheck {
             id: "model.registered".to_string(),
             status: DiagnosticStatus::Error,
-            message: format!("モデル '{}' は登録されていません", model_name),
-            remediation: Some(
-                "hoshikage list --details で登録済みモデルを確認してください".to_string(),
+            message: text(
+                format!("Model '{model_name}' is not registered"),
+                format!("モデル '{model_name}' は登録されていません"),
             ),
+            remediation: Some(text(
+                "Run hoshikage list --details to list registered models",
+                "hoshikage list --details で登録済みモデルを確認してください",
+            )),
         });
         return Ok(checks);
     };
@@ -348,21 +740,30 @@ fn capability_check(
     };
 
     let message = match status {
-        CapabilityStatus::Available => format!("{} は利用できます", label),
-        CapabilityStatus::Missing => format!("{} は利用できません", label),
-        CapabilityStatus::AdapterRequired => {
-            format!(
-                "{} は runtime 側に存在しますが adapter 接続が必要です",
-                label
-            )
-        }
+        CapabilityStatus::Available => text(
+            format!("{label} is available"),
+            format!("{label} は利用できます"),
+        ),
+        CapabilityStatus::Missing => text(
+            format!("{label} is unavailable"),
+            format!("{label} は利用できません"),
+        ),
+        CapabilityStatus::AdapterRequired => text(
+            format!("{label} exists in the runtime but requires an adapter"),
+            format!("{label} は runtime 側に存在しますが adapter 接続が必要です"),
+        ),
     };
 
     DiagnosticCheck {
         id: id.to_string(),
         status: diagnostic_status,
         message,
-        remediation: (diagnostic_status != DiagnosticStatus::Ok).then(|| remediation.to_string()),
+        remediation: (diagnostic_status != DiagnosticStatus::Ok).then(|| {
+            text(
+                "Install or enable the required Hoshikage runtime capability",
+                remediation,
+            )
+        }),
     }
 }
 
@@ -371,15 +772,24 @@ fn file_check(id: &str, path: &Path, ok_message: &str, err_message: &str) -> Dia
         DiagnosticCheck {
             id: id.to_string(),
             status: DiagnosticStatus::Ok,
-            message: format!("{}: {}", ok_message, path.display()),
+            message: text(
+                format!("File is available: {}", path.display()),
+                format!("{}: {}", ok_message, path.display()),
+            ),
             remediation: None,
         }
     } else {
         DiagnosticCheck {
             id: id.to_string(),
             status: DiagnosticStatus::Error,
-            message: format!("{}: {}", err_message, path.display()),
-            remediation: Some("登録内容または runtime 配置先のパスを確認してください".to_string()),
+            message: text(
+                format!("File is missing: {}", path.display()),
+                format!("{}: {}", err_message, path.display()),
+            ),
+            remediation: Some(text(
+                "Check the configured path or runtime installation",
+                "登録内容または runtime 配置先のパスを確認してください",
+            )),
         }
     }
 }
@@ -389,18 +799,24 @@ fn directory_check(id: &str, path: &Path, ok_message: &str, err_message: &str) -
         DiagnosticCheck {
             id: id.to_string(),
             status: DiagnosticStatus::Ok,
-            message: format!("{}: {}", ok_message, path.display()),
+            message: text(
+                format!("Directory is available: {}", path.display()),
+                format!("{}: {}", ok_message, path.display()),
+            ),
             remediation: None,
         }
     } else {
         DiagnosticCheck {
             id: id.to_string(),
             status: DiagnosticStatus::Error,
-            message: format!("{}: {}", err_message, path.display()),
-            remediation: Some(
-                "llama.cpp runtime bundle を ~/.config/hoshikage/llama.cpp に配置してください"
-                    .to_string(),
+            message: text(
+                format!("Directory is missing: {}", path.display()),
+                format!("{}: {}", err_message, path.display()),
             ),
+            remediation: Some(text(
+                "Install the llama.cpp runtime bundle in ~/.config/hoshikage/llama.cpp",
+                "llama.cpp runtime bundle を ~/.config/hoshikage/llama.cpp に配置してください",
+            )),
         }
     }
 }
@@ -415,17 +831,24 @@ fn optional_backend_file_check(
         DiagnosticCheck {
             id: id.to_string(),
             status: DiagnosticStatus::Ok,
-            message: format!("{}: {}", ok_message, path.display()),
+            message: text(
+                format!("Optional backend is available: {}", path.display()),
+                format!("{}: {}", ok_message, path.display()),
+            ),
             remediation: None,
         }
     } else {
         DiagnosticCheck {
             id: id.to_string(),
             status: DiagnosticStatus::Warn,
-            message: format!("{}: {}", warn_message, path.display()),
-            remediation: Some(
-                "CUDA 版 llama.cpp runtime bundle の配置を確認してください".to_string(),
+            message: text(
+                format!("Optional backend is missing: {}", path.display()),
+                format!("{}: {}", warn_message, path.display()),
             ),
+            remediation: Some(text(
+                "Check the CUDA llama.cpp runtime bundle installation",
+                "CUDA 版 llama.cpp runtime bundle の配置を確認してください",
+            )),
         }
     }
 }
@@ -435,16 +858,23 @@ fn vision_compat_check(runtime_report: Option<&RuntimeCapabilityReport>) -> Diag
         Some(CapabilityStatus::Available) => DiagnosticCheck {
             id: "model.vision.compat".to_string(),
             status: DiagnosticStatus::Ok,
-            message: "mmproj 設定と Vision runtime は整合しています".to_string(),
+            message: text(
+                "The mmproj configuration matches the Vision runtime",
+                "mmproj 設定と Vision runtime は整合しています",
+            ),
             remediation: None,
         },
         _ => DiagnosticCheck {
             id: "model.vision.compat".to_string(),
             status: DiagnosticStatus::Error,
-            message: "mmproj が設定されていますが Vision runtime が利用できません".to_string(),
-            remediation: Some(
-                "libmtmd を含む llama.cpp runtime bundle を配置してください".to_string(),
+            message: text(
+                "mmproj is configured, but the Vision runtime is unavailable",
+                "mmproj が設定されていますが Vision runtime が利用できません",
             ),
+            remediation: Some(text(
+                "Install a llama.cpp runtime bundle that includes libmtmd",
+                "libmtmd を含む llama.cpp runtime bundle を配置してください",
+            )),
         },
     }
 }
@@ -457,7 +887,7 @@ fn speculation_compat_check(
         return DiagnosticCheck {
             id: "model.speculation.compat".to_string(),
             status: DiagnosticStatus::Ok,
-            message: "speculation は off です".to_string(),
+            message: text("Speculation is disabled", "speculation は off です"),
             remediation: None,
         };
     }
@@ -469,7 +899,10 @@ fn speculation_compat_check(
         return DiagnosticCheck {
             id: "model.speculation.compat".to_string(),
             status: DiagnosticStatus::Ok,
-            message: "speculation 設定と runtime は整合しています".to_string(),
+            message: text(
+                "The speculation configuration matches the runtime",
+                "speculation 設定と runtime は整合しています",
+            ),
             remediation: None,
         };
     }
@@ -482,14 +915,26 @@ fn speculation_compat_check(
         } else {
             DiagnosticStatus::Warn
         },
-        message: format!(
-            "{:?} が設定されていますが runtime adapter が未接続です",
-            model_config.speculation.modes
+        message: text(
+            format!(
+                "{:?} is configured, but the runtime adapter is not connected",
+                model_config.speculation.modes
+            ),
+            format!(
+                "{:?} が設定されていますが runtime adapter が未接続です",
+                model_config.speculation.modes
+            ),
         ),
         remediation: Some(if strict {
-            "fallback を warn にするか、adapter 実装後に有効化してください".to_string()
+            text(
+                "Set fallback to warn or enable speculation after installing the adapter",
+                "fallback を warn にするか、adapter 実装後に有効化してください",
+            )
         } else {
-            "fallback 方針に従い通常推論へ戻します".to_string()
+            text(
+                "Hoshikage will fall back to normal inference according to the fallback policy",
+                "fallback 方針に従い通常推論へ戻します",
+            )
         }),
     }
 }
@@ -502,7 +947,7 @@ fn thinking_compat_check(
         return DiagnosticCheck {
             id: "model.thinking.compat".to_string(),
             status: DiagnosticStatus::Ok,
-            message: "Thinking mode は auto です".to_string(),
+            message: text("Thinking mode is automatic", "Thinking mode は auto です"),
             remediation: None,
         };
     }
@@ -514,17 +959,27 @@ fn thinking_compat_check(
         DiagnosticCheck {
             id: "model.thinking.compat".to_string(),
             status: DiagnosticStatus::Warn,
-            message:
-                "Thinking off は prompt policy と safety filter で適用されます。runtime budget adapter は未接続です"
-                    .to_string(),
-            remediation: Some("adapter 実装フェーズで runtime budget 制御を接続します".to_string()),
+            message: text(
+                "Thinking off is enforced by the prompt policy and safety filter; the runtime budget adapter is not connected",
+                "Thinking off は prompt policy と safety filter で適用されます。runtime budget adapter は未接続です",
+            ),
+            remediation: Some(text(
+                "Connect runtime budget control when the adapter is available",
+                "adapter 実装フェーズで runtime budget 制御を接続します",
+            )),
         }
     } else {
         DiagnosticCheck {
             id: "model.thinking.compat".to_string(),
             status: DiagnosticStatus::Error,
-            message: "Thinking off の prompt policy を適用できません".to_string(),
-            remediation: Some("libllama の chat template API を確認してください".to_string()),
+            message: text(
+                "The Thinking-off prompt policy cannot be applied",
+                "Thinking off の prompt policy を適用できません",
+            ),
+            remediation: Some(text(
+                "Check the libllama chat template API",
+                "libllama の chat template API を確認してください",
+            )),
         }
     }
 }
@@ -577,8 +1032,8 @@ fn summarize(checks: &[DiagnosticCheck]) -> DiagnosticSummary {
     }
 }
 
-fn print_report(report: &DoctorReport) {
-    println!("Hoshikage doctor");
+fn print_report(report: &DoctorReport, language: Language) {
+    println!("{}", language.select("Hoshikage doctor", "Hoshikage診断"));
     println!("================");
     println!("status: {:?}", report.summary.status);
     println!("llama.cpp runtime: {}", report.llama_cpp_runtime_dir);
@@ -594,9 +1049,18 @@ fn print_report(report: &DoctorReport) {
     println!();
 
     for check in &report.checks {
-        println!("[{:?}] {} - {}", check.status, check.id, check.message);
+        println!(
+            "[{:?}] {} - {}",
+            check.status,
+            check.id,
+            check.message.get(language)
+        );
         if let Some(remediation) = &check.remediation {
-            println!("      next: {}", remediation);
+            println!(
+                "      {}: {}",
+                language.select("next", "対処"),
+                remediation.get(language)
+            );
         }
     }
 }
@@ -612,19 +1076,19 @@ mod tests {
             DiagnosticCheck {
                 id: "ok".to_string(),
                 status: DiagnosticStatus::Ok,
-                message: "ok".to_string(),
+                message: text("ok", "正常"),
                 remediation: None,
             },
             DiagnosticCheck {
                 id: "warn".to_string(),
                 status: DiagnosticStatus::Warn,
-                message: "warn".to_string(),
+                message: text("warning", "警告"),
                 remediation: None,
             },
             DiagnosticCheck {
                 id: "error".to_string(),
                 status: DiagnosticStatus::Error,
-                message: "error".to_string(),
+                message: text("error", "エラー"),
                 remediation: None,
             },
         ];
@@ -679,5 +1143,49 @@ mod tests {
         let check = thinking_compat_check(&config, None);
 
         assert_eq!(check.status, DiagnosticStatus::Ok);
+    }
+
+    #[test]
+    fn codex_checks_have_stable_order_and_warn_for_text_only_model() {
+        let checks = codex_capability_checks(&CodexEndpointSnapshot {
+            model_found: true,
+            responses: true,
+            streaming: true,
+            tools: false,
+            codex_compatible: true,
+        });
+
+        assert_eq!(
+            checks
+                .iter()
+                .map(|check| check.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "codex.connection",
+                "codex.model",
+                "codex.responses",
+                "codex.streaming",
+                "codex.tools",
+                "codex.context",
+            ]
+        );
+        assert_eq!(checks[4].status, DiagnosticStatus::Warn);
+    }
+
+    #[test]
+    fn codex_checks_fail_dependents_when_model_is_missing() {
+        let checks = codex_capability_checks(&CodexEndpointSnapshot {
+            model_found: false,
+            responses: false,
+            streaming: false,
+            tools: false,
+            codex_compatible: false,
+        });
+
+        assert_eq!(checks[0].status, DiagnosticStatus::Ok);
+        assert_eq!(checks[1].status, DiagnosticStatus::Error);
+        assert!(checks[2..]
+            .iter()
+            .all(|check| check.status == DiagnosticStatus::Error));
     }
 }

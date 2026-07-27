@@ -357,6 +357,13 @@ impl Config {
         Ok(config_dir.join("hoshikage").join("auth_tokens.json"))
     }
 
+    pub fn debug_capture_path(&self) -> Result<PathBuf> {
+        let config_dir = dirs::config_dir().ok_or_else(|| {
+            crate::error::HoshikageError::ConfigError("Config directory not found".to_string())
+        })?;
+        Ok(config_dir.join("hoshikage").join("debug-capture"))
+    }
+
     pub fn resolve_lib_path(&self) -> Result<PathBuf> {
         let lib_name = if cfg!(target_os = "windows") {
             "llama.dll"

@@ -1,6 +1,8 @@
 use super::wire::CompletedResponseWire;
 use crate::application::ResponsesService;
+use crate::conversation::RequestId;
 use axum::extract::rejection::JsonRejection;
+use axum::http::{HeaderName, HeaderValue};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
@@ -14,10 +16,33 @@ pub async fn responses(
     Extension(service): Extension<Arc<ResponsesService>>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let request_id = match RequestId::new(format!("req_{}", uuid::Uuid::new_v4().simple())) {
+        Ok(request_id) => request_id,
+        Err(_) => {
+            return crate::api::error::responses_error(
+                crate::application::ResponsesServiceError::Identity,
+            );
+        }
+    };
+    let mut response = responses_observed(service, payload, request_id.clone()).await;
+    if let Ok(value) = HeaderValue::from_str(request_id.as_str()) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("x-request-id"), value);
+    }
+    response
+}
+
+async fn responses_observed(
+    service: Arc<ResponsesService>,
+    payload: Result<Json<Value>, JsonRejection>,
+    request_id: RequestId,
+) -> Response {
     let Json(body) = match payload {
         Ok(payload) => payload,
         Err(error) => return crate::api::error::invalid_json(error.status(), error.body_text()),
     };
+    capture_debug_payload(&service, &request_id, "request", &body).await;
     let request = match super::wire::decode_request_with_limits(
         body,
         service.unknown_field_policy(),
@@ -26,21 +51,25 @@ pub async fn responses(
         Ok(request) => request,
         Err(error) => return crate::api::error::wire_request_error(error),
     };
+    tracing::info!(
+        request_id = request_id.as_str(),
+        model = request.model.as_str(),
+        stream = request.stream,
+        tools_count = request.tools.tools().len(),
+        "Responses request started"
+    );
     if request.stream {
-        return match service.execute_stream(request).await {
+        return match service
+            .execute_stream_observed(request, request_id.clone())
+            .await
+        {
             Ok(events) => {
-                let stream = events.map(|result| {
-                    let event = match result {
-                        Ok(event) => super::sse::to_sse_event(&event).unwrap_or_else(|_| {
-                            Event::default().event("error").data(
-                                r#"{"type":"error","code":"response_translation_failed","message":"Response translation failed"}"#,
-                            )
-                        }),
-                        Err(_) => Event::default().event("error").data(
-                            r#"{"type":"error","code":"generation_failed","message":"Generation failed"}"#,
-                        ),
-                    };
-                    Ok::<Event, Infallible>(event)
+                let capture = service.debug_capture();
+                let request_id = request_id.as_str().to_string();
+                let stream = events.then(move |result| {
+                    let capture = capture.clone();
+                    let request_id = request_id.clone();
+                    async move { stream_result_to_sse(result, capture, &request_id).await }
                 });
                 Sse::new(stream)
                     .keep_alive(
@@ -53,9 +82,67 @@ pub async fn responses(
             Err(error) => crate::api::error::responses_error(error),
         };
     }
-    match service.execute(request).await {
-        Ok(completed) => Json(CompletedResponseWire::from(completed)).into_response(),
+    match service.execute_observed(request, request_id.clone()).await {
+        Ok(completed) => {
+            let wire = CompletedResponseWire::from(completed);
+            if let Ok(value) = serde_json::to_value(&wire) {
+                capture_debug_payload(&service, &request_id, "response", &value).await;
+            }
+            Json(wire).into_response()
+        }
         Err(error) => crate::api::error::responses_error(error),
+    }
+}
+
+async fn stream_result_to_sse(
+    result: Result<crate::application::ResponseEvent, crate::application::ResponsesServiceError>,
+    capture: Option<crate::observability::DebugCapture>,
+    request_id: &str,
+) -> Result<Event, Infallible> {
+    let event = match result {
+        Ok(event) => {
+            let terminal = matches!(
+                &event,
+                crate::application::ResponseEvent::Completed { .. }
+                    | crate::application::ResponseEvent::Error { .. }
+                    | crate::application::ResponseEvent::Failed { .. }
+            );
+            if terminal {
+                if let Some(capture) = capture {
+                    let value = super::sse::response_event_value(&event);
+                    if let Err(error) = capture.capture(request_id, "response", &value).await {
+                        tracing::warn!(request_id, error = %error, "Debug capture failed");
+                    }
+                }
+            }
+            super::sse::to_sse_event(&event).unwrap_or_else(|_| {
+                Event::default().event("error").data(
+                    r#"{"type":"error","code":"response_translation_failed","message":"Response translation failed"}"#,
+                )
+            })
+        }
+        Err(_) => Event::default()
+            .event("error")
+            .data(r#"{"type":"error","code":"generation_failed","message":"Generation failed"}"#),
+    };
+    Ok(event)
+}
+
+async fn capture_debug_payload(
+    service: &ResponsesService,
+    request_id: &RequestId,
+    kind: &str,
+    payload: &Value,
+) {
+    let Some(capture) = service.debug_capture() else {
+        return;
+    };
+    if let Err(error) = capture.capture(request_id.as_str(), kind, payload).await {
+        tracing::warn!(
+            request_id = request_id.as_str(),
+            error = %error,
+            "Debug capture failed"
+        );
     }
 }
 
@@ -185,6 +272,21 @@ mod tests {
         router_with_timeout(std::time::Duration::from_secs(1))
     }
 
+    fn router_with_capture(path: std::path::PathBuf) -> Router {
+        let service = Arc::new(
+            ResponsesService::new(
+                Arc::new(FakeGateway),
+                UnknownFieldPolicy::Compatible,
+                std::time::Duration::from_secs(1),
+                crate::application::ResponsesRequestLimits::default(),
+            )
+            .with_debug_capture(crate::observability::DebugCapture::new(path).unwrap()),
+        );
+        Router::new()
+            .route("/v1/responses", post(responses))
+            .layer(Extension(service))
+    }
+
     #[tokio::test]
     async fn non_stream_text_request_returns_openai_response_shape() {
         let response = router()
@@ -200,11 +302,51 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers()["x-request-id"]
+            .to_str()
+            .unwrap()
+            .starts_with("req_"));
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["object"], "response");
         assert_eq!(value["output"][0]["content"][0]["text"], "OK");
         assert_eq!(value["usage"]["total_tokens"], 5);
+    }
+
+    #[tokio::test]
+    async fn debug_capture_uses_request_id_and_excludes_sensitive_fields() {
+        let root = std::env::temp_dir().join(format!(
+            "hoshikage-handler-capture-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let response = router_with_capture(root.clone())
+            .oneshot(
+                Request::post("/v1/responses")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer header-secret")
+                    .body(Body::from(
+                        r#"{
+                            "model":"gemma4",
+                            "input":"Return OK.",
+                            "stream":false,
+                            "metadata":{"token":"body-secret"}
+                        }"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let request_id = response.headers()["x-request-id"].to_str().unwrap();
+        let capture = std::fs::read_to_string(root.join(format!("{request_id}.jsonl"))).unwrap();
+        assert!(capture.contains("\"kind\":\"request\""));
+        assert!(capture.contains("\"kind\":\"response\""));
+        assert!(capture.contains("Return OK."));
+        assert!(!capture.contains("header-secret"));
+        assert!(!capture.contains("body-secret"));
+        assert!(!capture.contains("\"metadata\""));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

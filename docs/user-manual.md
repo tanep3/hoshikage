@@ -1,479 +1,405 @@
-# ユーザーマニュアル：星影 - Rust版高速ローカル推論サーバー
+# Hoshikage ユーザーマニュアル
 
-**バージョン:** 1.0.0  
-**作成日:** 2026-01-18  
-**言語:** Rust
+[English](user-manual.en.md) | 日本語
 
----
+HoshikageはGGUFモデルを管理し、Chat Completions APIとResponses APIを提供するローカル推論サーバーです。Codex CLIなどの上位エージェントがツール実行と反復を担当し、Hoshikageはモデル実行とプロトコル変換を担当します。
 
 ## 1. インストール
 
-### 1.1 システム要件
+### 1.1 必要環境
 
-| 項目 | 最小要件 | 推奨要件 |
-|--------|---------|---------|
-| CPU | 8コア以上 | 16コア以上 |
-| メモリ | 16GB以上 | 32GB以上 |
-| GPU | VRAM 8GB以上 | VRAM 12GB以上 |
-| ストレージ | SSD 50GB以上 | NVMe SSD 100GB以上 |
+- Rust stable toolchain
+- Hoshikage用llama.cpp runtime bundle
+- 利用するGGUFモデル
+- GPU利用時は対応するCUDA環境
 
-### 1.2 ソフトウェア要件
-
-- **OS**: Linux（Ubuntu 20.04以降推奨）
-- **CUDAドライバ**: 470+ (GPU使用時)
-- **Rust**: 1.70以上（Cargo経由でインストールされます）
-
-### 1.3 依存関係のインストール
-
-**Linuxの場合:**
 ```bash
-# 1. 実行パスの設定（.bashrc推奨）
-echo 'export LD_LIBRARY_PATH=$HOME/.config/hoshikage/llama.cpp:$LD_LIBRARY_PATH' >> ~/.bashrc
-source ~/.bashrc
-
-# 2. Cargo経由でローカルインストール
 cargo install --path .
+hoshikage --version
 ```
 
-**Windowsの場合 (PowerShell):**
-```powershell
-# 1. ライブラリ配置用ディレクトリ作成
-mkdir -p "$env:APPDATA\hoshikage\lib"
+runtime bundleは標準でOS別Hoshikage設定directoryの`llama.cpp`へ配置します。別の場所を使う場合は`HOSHIKAGE_LLAMA_CPP_RUNTIME_DIR`を設定します。
 
-# 2. 環境変数(PATH)設定 (永続的)
-[System.Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:APPDATA\hoshikage\lib", [System.EnvironmentVariableTarget]::User)
+### 1.2 設定ファイル
 
-# 3. Cargo経由でローカルインストール
-cargo install --path .
+Hoshikage serverの標準設定directoryはOSごとに異なります。
+
+| OS | Hoshikage設定directory |
+|---|---|
+| Linux | `~/.config/hoshikage` |
+| macOS | `~/Library/Application Support/hoshikage` |
+| Windows | `%APPDATA%\hoshikage` |
+
+Hoshikageはこのdirectoryの`.env`を読み込みます。別ファイルを使う場合は`HOSHIKAGE_CONFIG_PATH`を設定します。この場所はHoshikage server自身の設定・Token管理用であり、Codexや上位アプリケーションの設定場所ではありません。
+
+```dotenv
+HOST=127.0.0.1
+PORT=3030
+N_CTX=16384
+HOSHIKAGE_LANG=ja
 ```
 
-これにより、`hoshikage` コマンドがターミナルから直接利用可能になります。
-※ 別途 `libllama.so` (Linux) または `llama.dll` (Windows) を上記設定パスに配置する必要があります。
-現行の配置方針は `docs/LIBRARY_GUIDE.md`、最新 llama.cpp の導入手順は `docs/llama-cpp-install-guide.md` を参照してください。
-
----
+`HOST=127.0.0.1`または`localhost`は認証なしのloopback利用です。LANアドレスまたは`0.0.0.0`へbindするとBearer Token認証が必須になります。
 
 ## 2. モデル管理
 
-### 2.1 モデルの登録
+### 2.1 モデル登録
 
-GGUFモデルを `models/` ディレクトリに配置し、`~/.config/hoshikage/model_map.json` に登録します。
-
-**model_map.jsonのフォーマット:**
-
-```json
-{
-  "model-alias": {
-    "base_path": "/path/to/models",
-    "model": "model-file.gguf",
-    "stop": ["<|im_end|>", "</s>"]
-  }
-}
-```
-
-既存の `path` field も読み込み互換のため使用できます。新しく保存する設定では `base_path` を使用します。
-
-`stop` はデフォルトのストップシーケンスにマージされ、重複は除去されます。
-デフォルトには `<|im_start|>`, `<|im_end|>`, `</s>`, `<|eot_id|>`, `<|endoftext|>` が含まれます。
-
-**例:**
 ```bash
-mkdir -p models
-cp /path/to/LFM2.5-1.2B-JP-Q8_0.gguf models/
-
-# model_map.json を作成
-cat > ~/.config/hoshikage/model_map.json << 'EOF'
-{
-  "LFM2.5_Q8": {
-    "base_path": "./models",
-    "model": "LFM2.5-1.2B-JP-Q8_0.gguf",
-    "stop": ["<|im_end|>", "<|eot_id|>", "</s>"]
-  }
-}
-EOF
-```
-
-Vision や speculative decoding 用の追加ファイルがあるモデルは、同じ `model_map.json` に bundle 設定として保存できます。
-
-```json
-{
-  "gemma4-local": {
-    "base_path": "/models/gemma4-local",
-    "model": "main.gguf",
-    "mmproj": "mmproj.gguf",
-    "drafter": "mtp.gguf",
-    "speculation": {
-      "mode": "mtp",
-      "fallback": "warn"
-    },
-    "thinking": {
-      "mode": "off"
-    },
-    "n_ctx": 8192,
-    "n_gpu_layers": 99
-  }
-}
-```
-
-### 2.2 モデルの管理 (CLI)
-
-`hoshikage` コマンドでモデルを簡単に管理できます。サーバー起動中でも、停止中でも、いつでも実行可能です。
-
-#### モデルの追加
-```bash
-# 基本 (パスとラベルのみ)
-hoshikage add /path/to/LFM.gguf LFM-v2
-
-# ストップワードを指定する場合
-hoshikage add /path/to/LFM.gguf LFM-v2 "</s>" "<|im_end|>"
-
-# Vision 用 projector を登録する場合
-hoshikage add /models/gemma4/main.gguf gemma4-local --mmproj /models/gemma4/mmproj.gguf
-
-# MTP 用 drafter と Thinking off を登録する場合
-hoshikage add /models/gemma4/main.gguf gemma4-local --mtp-drafter /models/gemma4/mtp.gguf --thinking-off
-
-# モデル別 context / GPU offload を登録する場合
-# CUDA で全層GPU offloadを狙う場合は 99 など十分大きい値を指定します。
-hoshikage add /models/gemma4/main.gguf gemma4-local --n-ctx 8192 --n-gpu-layers 99
-
-# 登録前に bundle と runtime の整合性を確認する場合
-hoshikage add /models/gemma4/main.gguf gemma4-local --mmproj /models/gemma4/mmproj.gguf --check
-```
-
-`--n-ctx` と `--n-gpu-layers` はモデル単位の設定として保存され、該当モデルのロード時にサーバー全体の既定値より優先されます。
-
-#### モデルの削除
-```bash
-hoshikage rm LFM-v2
-```
-
-#### モデルの一覧表示
-```bash
-hoshikage list
-
-# 詳細表示
+hoshikage add /models/gemma4/model.gguf unsloth-gemma4-12b-qat-thinking-off --n-ctx 16384 --thinking-off
 hoshikage list --details
 ```
 
-#### runtime / bundle 診断
+Codex利用の実用下限は16K context、推奨は32Kです。モデルごとの`n_ctx`が未指定の場合は`.env`の`N_CTX`を使います。
+
+Tool CallingはBundleの`tool_calling`設定を正とします。未設定Bundleは安全側で`disabled`です。`doctor`は候補や矛盾を診断しますが、自動書換えしません。
+
+### 2.2 Bundle診断
+
 ```bash
-# runtime library と backend の診断
-hoshikage doctor
-
-# 登録済みモデルの bundle 整合性も診断
-hoshikage doctor --model gemma4-local
-
-# JSON で出力
-hoshikage doctor --model gemma4-local --json
+hoshikage doctor --model unsloth-gemma4-12b-qat-thinking-off
+hoshikage doctor --model unsloth-gemma4-12b-qat-thinking-off --json
 ```
 
-### 2.3 モデルの切り替え
-リクエストの`model`パラメータで登録したモデルラベル（例: `LFM-v2`）を指定することで、動的に使用するモデルを切り替えられます。
+`--json`のfield名、status、ID、`message_key`は言語設定で変化しません。自動処理では表示文ではなくこれらを使用してください。
 
-### 2.4 次期 Model Bundle 方針
+## 3. Loopback最短手順
 
-現行版では、モデルごとの設定は `~/.config/hoshikage/model_map.json` に保存されます。
-`.env` はサーバー全体の既定値を扱い、モデルごとの差分は `model_map.json` 側で管理する方針です。
+### 3.1 サーバー起動
 
-次期モデルランタイム改訂では、次のようなファイルと設定を Model Bundle としてモデル単位に管理する予定です。
-
-- メイン GGUF モデル
-- Vision projector (`mmproj`)
-- Draft model
-- stop sequence
-- context length
-- GPU offload 設定
-- MTP / Draft model の fallback mode
-
-詳細は `docs/model-runtime-revision-requirements.md` を参照してください。
-
----
-
-## 3. 設定
-(高度な設定)
-
-### 3.1 環境変数の設定 (.env)
-サーバーの動作を環境変数ファイル (`.env`) でカスタマイズできます。
-`~/.config/hoshikage/.env` に配置すると自動的に読み込まれます。
-
-**設定ファイルの例 (.env.example):**
-```bash
-# サーバーポート
-PORT=3030
-
-# ログファイル出力パス (ファイルパスとして扱う)
-# 例: ~/.config/hoshikage/logs/hoshikage.log
-# 出力は日次ローテーションされ、LOG_FILE_PATH.YYYY-MM-DD になります。
-# LOG_FILE_PATH=~/.config/hoshikage/logs/hoshikage.log
-
-# 非アクティブ時の自動アンロードまでの時間 (秒)
-# 0 にすると自動アンロード無効（デフォルト: 300）
-IDLE_TIMEOUT=300
-
-# RAMディスク設定 (高速ロード用)
-# Linuxの場合: /dev/shm などを指定できます。sudo権限も不要です。
-# Model Bundle は RAMDISK_PATH/hoshikage/current に配置されます。
-# Windows / Mac はRAMディスク非対応のため、自動的にSSDからの直接ロードになります。
-RAMDISK_PATH=/dev/shm
-
-# 長時間非アクティブ時のRAMディスク解放 (分)
-# メモリを完全にOSに返すまでの時間（デフォルト: 60分）
-GREAT_TIMEOUT=60
-
-# コンテキスト長 (トークン数)
-# デフォルト: 4096
-N_CTX=4096
-
-# 生成パラメータ
-# デフォルト: TEMPERATURE=0.2, TOP_P=0.95
-TEMPERATURE=0.2
-TOP_P=0.95
-
-# MTP 有効時の速度を優先する場合は 1.0 を推奨します。
-REPEAT_PENALTY=1.0
-
-# llama-server の独自 idle sleep は標準では無効にします。
-# VRAM 滞在は IDLE_TIMEOUT、RAM ディスク滞在は GREAT_TIMEOUT で管理します。
-HOSHIKAGE_LLAMA_SERVER_SLEEP_IDLE_SECS=off
-
-```
-
-詳細なパラメータは、プロジェクトに含まれる `.env.example` を参照してください。
-
-`LOG_FILE_PATH` を指定しない場合、ログは標準出力/標準エラーに出力されます。
-
----
-
-## 4. サーバー起動
-
-### 3.1 準備
-ライブラリが正しく設定されていれば、特別な環境変数は不要です。
-もし一時的にパスを通したい場合は以下のようにします。
+`.env`で`HOST=127.0.0.1`を指定し、Hoshikageを起動します。
 
 ```bash
-export LD_LIBRARY_PATH=~/.config/hoshikage/llama.cpp:$LD_LIBRARY_PATH
-```
-
-### 4.2 起動コマンド
-
-```bash
-# 標準起動
 hoshikage
-
-# カスタムポートで起動
-hoshikage --port 3030
+curl http://127.0.0.1:3030/health
+curl http://127.0.0.1:3030/ready
 ```
 
-### 4.3 デーモンとして実行 (ユーザーモード)
-
-`systemd` のユーザーユニット機能を使って、管理者権限なしで常駐させることができます。
+### 3.2 Responses API確認
 
 ```bash
-# 1. ユニットファイル配置用ディレクトリ作成
-mkdir -p ~/.config/systemd/user
-
-# 2. ユニットファイル作成
-nano ~/.config/systemd/user/hoshikage.service
-```
-
-**hoshikage.service の内容:**
-```ini
-[Unit]
-Description=星影 (Hoshikage) - AI Inference Server
-After=network.target
-
-[Service]
-Type=simple
-# 環境変数を指定（絶対パスで記述）
-Environment=LD_LIBRARY_PATH=%h/.config/hoshikage/llama.cpp
-WorkingDirectory=%h/dev/AI/hoshikage
-ExecStart=%h/dev/AI/hoshikage/target/release/hoshikage
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-```
-※ `%h` はホームディレクトリ（`/home/ユーザー名`）に自動置換されます。
-
-```bash
-# 3. サービスの有効化と起動
-systemctl --user daemon-reload
-systemctl --user enable hoshikage
-systemctl --user start hoshikage
-
-# 4. ステータス確認
-systemctl --user status hoshikage
-
-# (任意) ログアウト後も実行し続ける場合
-loginctl enable-linger $USER
-```
-
-## 5. APIの使用
-
-### 5.1 curlでテスト
-
-#### 5.1.1 チャット補完（非ストリーミング）
-
-```bash
-curl -X POST http://localhost:3030/v1/chat/completions \
+curl http://127.0.0.1:3030/v1/responses \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "LFM2.5_Q8",
-    "messages": [
-      {"role": "user", "content": "こんにちは、よろしくお願いします。"}
-    ],
-    "temperature": 0.2,
-    "max_tokens": 256,
-    "stream": false
-  }'
+  -d '{"model":"unsloth-gemma4-12b-qat-thinking-off","input":"Return exactly OK."}'
 ```
 
-#### 5.1.2 チャット補完（ストリーミング）
+loopbackではTokenは不要です。`/health`はプロセスの生存確認、`/ready`は設定とruntimeの受付準備、`/v1/status`はモデルのロード状態確認に使います。
+
+## 4. LANとToken
+
+### 4.1 Tokenとは何か
+
+Tokenは、LAN上のHoshikageを利用してよい端末であることを確認するための秘密の合言葉です。OpenAIのAPIキー、ChatGPTのログイン情報、モデルのライセンスキーではありません。同じPC内の`127.0.0.1`接続では不要ですが、別のPCからLAN経由で接続する場合は必須です。
+
+Token本文を知っている端末はHoshikageへ推論を依頼できます。パスワードと同じように扱い、Git、Model Bundle、Issue、ログ、チャットへ記載しないでください。CodexのTOMLへToken本文を直接書かず、起動元の上位アプリケーションがprocess環境変数`HOSHIKAGE_API_KEY`として渡します。
+
+### 4.2 Hoshikage側でTokenを作る
+
+Hoshikage serverを動かすマシンへ管理者としてloginし、接続元ごとに用途名付きTokenを作成します。`hoshikage token`はremote APIではなく、そのマシンのToken storeを直接管理するCLIです。
 
 ```bash
-curl -X POST http://localhost:3030/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "LFM2.5_Q8",
-    "messages": [
-      {"role": "user", "content": "猫について説明してください。"}
-    ],
-    "stream": true
-  }'
+hoshikage token create codex-desktop
+hoshikage token list
 ```
 
-#### 5.1.3 画像入力形式
+`token list`はname、Token本文、public ID、作成日時、更新日時を表示します。server machineの管理者用ツールなので全情報を表示します。画面共有中、端末出力の収集中、第三者が見られる場所では実行しないでください。`codex-desktop`は管理用の用途名であり、Token本文ではありません。
 
-Chat Completions API の `messages[].content` は、従来の文字列に加えて OpenAI 互換の parts 配列も受け付けます。
-
-```json
-{
-  "role": "user",
-  "content": [
-    { "type": "text", "text": "この画像を説明してください。" },
-    {
-      "type": "image_url",
-      "image_url": {
-        "url": "data:image/png;base64,...",
-        "detail": "auto"
-      }
-    }
-  ]
-}
+```text
+codex-desktop	hsk_xxx_xxx	public_id=xxx	created=1780000000	updated=1780000000
 ```
 
-対応する画像指定は `data:image/png;base64,...`、`data:image/jpeg;base64,...`、`file:///absolute/path/image.png`、ローカル絶対パスです。外部 URL は初期実装では受け付けません。
+Token storeはHoshikage serverの標準設定directoryにある`auth_tokens.json`です。Linux・macOSではowner限定`0600`、WindowsではownerとSYSTEMだけにfull controlを許可するprotected ACLをHoshikageが設定・検証します。上位アプリケーションやCodexはこのファイルを直接読みません。
 
-画像入力には、モデル登録時に `--mmproj` を指定した Model Bundle が必要です。Vision 非対応モデルへ画像入力を送った場合は明示エラーになります。
+### 4.3 HoshikageをLANで待ち受ける
 
-### 5.2 Pythonで使用
+1.2に記載したHoshikage server側の`.env`を次のように設定し、Hoshikageを再起動します。
 
-#### 5.2.1 OpenAI SDK
-
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="http://localhost:3030/v1",
-    api_key="dummy"
-)
-
-# 非ストリーミング
-response = client.chat.completions.create(
-    model="LFM2.5_Q8",
-    messages=[
-        {"role": "system", "content": "あなたは親切なAIアシスタントです。"},
-        {"role": "user", "content": "こんにちは"}
-    ],
-    temperature=0.2
-)
-
-print(response.choices[0].message.content)
-
-# ストリーミング
-stream = client.chat.completions.create(
-    model="LFM2.5_Q8",
-    messages=[
-        {"role": "user", "content": "猫について説明してください。"}
-    ],
-    stream=True
-)
-
-for chunk in stream:
-    if chunk.choices[0].delta.content:
-        print(chunk.choices[0].delta.content, end="", flush=True)
+```dotenv
+HOST=0.0.0.0
+PORT=3030
 ```
 
----
-
-## 6. モデル一覧の確認
+本書ではHoshikage serverのLANアドレスを`192.168.1.50`として説明します。Linux・macOSのclientでは次を実行します。
 
 ```bash
-curl http://localhost:3030/v1/models
+curl http://192.168.1.50:3030/health
 ```
 
-**レスポンス例:**
-```json
-{
-  "object": "list",
-  "data": [
-    {
-      "id": "LFM2.5_Q8",
-      "object": "model",
-      "created": 1686935002,
-      "owned_by": "tane"
-    }
-  ]
-}
+WindowsのPowerShellでは次を実行し、`TcpTestSucceeded : True`とhealth情報が返ることを確認します。
+
+```powershell
+Test-NetConnection 192.168.1.50 -Port 3030
+Invoke-RestMethod http://192.168.1.50:3030/health
 ```
 
----
+失敗する場合は、IPアドレス、Hoshikageの起動状態、OSのファイアウォールを確認します。LAN公開は信頼できる家庭内・組織内ネットワークに限定し、ルーターでWANからのport forwardを行わないでください。
 
-## 7. ライブラリのトラブルシューティング
+### 4.4 上位アプリケーションからCodexへ渡す
 
-### 7.1 CUDAライブラリが見つからない
+Tokenの標準的な受け渡し責務は、YatagarasuなどCodexを起動する上位アプリケーションにあります。上位アプリケーションは選択したTokenを子processの`HOSHIKAGE_API_KEY`へ設定してCodexを起動し、OS全体へ永続登録しません。
 
-**エラー:** `libllama.so: cannot open shared object file`
-
-**解決策:**
-
-システムCUDAライブラリを使用する場合、環境変数を設定してください。
+Linux・macOSで手動確認する場合は、Tokenをshell historyへ残さないよう非表示入力できます。
 
 ```bash
-# システムCUDAライブラリのパスを確認
-echo $LD_LIBRARY_PATH
-
-# システムCUDAライブラリを使用する場合
-export LD_LIBRARY_PATH=/usr/local/cuda/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
-
-# Hoshikage runtime directory を明示する場合
-export LD_LIBRARY_PATH=~/.config/hoshikage/llama.cpp:$LD_LIBRARY_PATH
-
-# ライブラリの存在を確認
-ls /usr/local/cuda/targets/x86_64-linux/lib/libcuda.so
-ls /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so
-ls /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so
-
-# Hoshikage runtime の存在を確認
-ls ~/.config/hoshikage/llama.cpp/llama-server 2>/dev/null || echo "llama-server が見つかりません"
-ls ~/.config/hoshikage/llama.cpp/libllama.so 2>/dev/null || echo "libllama が見つかりません"
+printf "HOSHIKAGE_API_KEY: "
+IFS= read -rs HOSHIKAGE_API_KEY
+printf "\n"
+export HOSHIKAGE_API_KEY
+codex exec --profile hoshikage "Return exactly the word OK."
+unset HOSHIKAGE_API_KEY
 ```
 
-**Windowsの場合:**
-`%APPDATA%\hoshikage\llama.cpp` に `llama-server.exe` と `llama.dll` があるか確認してください。
+Windows PowerShellの現在のprocessだけへ設定して確認する例です。入力内容は画面に表示されるため、周囲と画面共有に注意してください。
 
+```powershell
+$env:HOSHIKAGE_API_KEY = Read-Host "HOSHIKAGE_API_KEY"
+codex exec --profile hoshikage "Return exactly the word OK."
+Remove-Item Env:HOSHIKAGE_API_KEY
+```
 
-### 7.2 ポートが競合している
+### 4.5 Windows版Codexアプリへ渡す
 
-**エラー:** `address already in use`
+Windows版Codexアプリを直接起動し、Tokenを注入する上位アプリケーションがない場合は、Windowsの利用者環境変数へ登録します。
 
-**解決策:**
+1. Windowsのスタートメニューで「環境変数」を検索します。
+2. 「環境変数を編集」または「アカウントの環境変数を編集」を開きます。
+3. 「ユーザー環境変数」の「新規」を選びます。
+4. 変数名へ`HOSHIKAGE_API_KEY`、変数値へToken本文を入力します。
+5. OKですべて閉じます。
+6. 起動中のCodexアプリを完全に終了し、もう一度起動します。
+
+PowerShellで永続登録する場合は次でも同じです。ただしTokenがPowerShellの履歴に残る可能性があるため、通常は上記の画面操作を推奨します。
+
+```powershell
+[Environment]::SetEnvironmentVariable("HOSHIKAGE_API_KEY", "<token>", "User")
+```
+
+Token本文を表示せず、登録の有無だけを確認できます。
+
+```powershell
+if ([Environment]::GetEnvironmentVariable("HOSHIKAGE_API_KEY", "User")) { "HOSHIKAGE_API_KEY is set" }
+```
+
+環境変数は、それを読み込んだ時点のアプリに保持されます。登録や更新の後にCodexアプリの再起動が必要なのはこのためです。
+
+### 4.6 Rotate・Revoke
+
 ```bash
-# 使用中のポートを確認
-sudo netstat -tulpn | grep :3030
-
-# 別のポートで起動
-./target/release/hoshikage --port 3031
+hoshikage token rotate codex-desktop
+hoshikage token revoke codex-desktop
 ```
+
+rotateすると旧Tokenは直ちに無効になります。`token list`で新Tokenを確認し、上位アプリケーションがCodexへ渡す値を更新してください。Windows利用者環境変数を使う場合は値を更新し、Codexアプリを完全に再起動します。端末を廃止した場合や漏えいが疑われる場合はrevokeします。
+
+旧digest-only形式のTokenは認証には引き続き使えますが、平文を復元できません。listに`<unavailable: rotate required>`と表示された用途名はrotateして新形式へ移行してください。
+
+### 4.7 401診断
+
+1. `hoshikage token list`で用途名が存在するか確認します。
+2. Codex processの`HOSHIKAGE_API_KEY`がlistに表示されたTokenと一致するか確認します。
+3. 上位アプリケーションまたはCodexをToken更新後に再起動したか確認します。
+4. Codex設定の`env_key`が`HOSHIKAGE_API_KEY`か確認します。
+5. Token本文をログ、Issue、チャットへ貼らないでください。
+
+## 5. Codex接続
+
+### 5.1 どこへ設定するか
+
+Codexの利用者設定はHoshikage server設定とは別です。
+
+| 利用環境 | Codex利用者設定 |
+|---|---|
+| Linux CLI | `~/.codex/config.toml` |
+| macOS CLI | `~/.codex/config.toml` |
+| Windows CLI・Codexアプリ | `%USERPROFILE%\.codex\config.toml` |
+
+作業ディレクトリの`.codex/config.toml`へProvider設定を置いてはいけません。Codexは安全上の理由から、プロジェクト設定内の`model_provider`と`model_providers`を無視します。`AGENTS.md`も作業指示を書くファイルであり、接続先やモデルを設定するファイルではありません。
+
+Windows版CodexアプリとWSL版Codex CLIの設定場所は別です。WindowsアプリはWindows側、WSL CLIは通常WSL側の`~/.codex`を読みます。
+
+### 5.2 Provider設定を生成する
+
+Hoshikage server machineで、実際のIPアドレスを指定して設定を生成します。
+
+```bash
+hoshikage codex-config \
+  --model unsloth-gemma4-12b-qat-thinking-off \
+  --base-url http://192.168.1.50:3030/v1 \
+  --authenticated
+```
+
+このコマンドは設定を画面に表示するだけで、Codex側のファイルを変更しません。表示結果は次の形式です。
+
+```toml
+model = "unsloth-gemma4-12b-qat-thinking-off"
+model_provider = "hoshikage"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+model_context_window = 16384
+model_auto_compact_token_limit = 12288
+tool_output_token_limit = 4096
+model_reasoning_summary = "none"
+
+[model_providers.hoshikage]
+name = "Hoshikage"
+base_url = "http://192.168.1.50:3030/v1"
+wire_api = "responses"
+env_key = "HOSHIKAGE_API_KEY"
+request_max_retries = 1
+stream_max_retries = 1
+```
+
+Token本文はこのTOMLへ書きません。`env_key`は「Codex processのどの環境変数からTokenを読むか」という指定です。
+
+### 5.3 OSごとに保存する
+
+Linux・macOSでは次の場所へ生成結果を保存します。
+
+```bash
+mkdir -p ~/.codex
+nano ~/.codex/config.toml
+```
+
+WindowsではPowerShellから次の場所を開きます。
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex"
+notepad "$env:USERPROFILE\.codex\config.toml"
+```
+
+生成されたTOMLを保存します。既存の`config.toml`がある場合は先にバックアップし、他の必要な設定を消さずに内容を統合してください。
+
+4.4または4.5の方法でTokenをCodex processへ渡して起動し、新しい作業で「Return exactly the word OK.」と依頼します。`OK`が返り、Hoshikage serverのログにrequestが記録されれば接続完了です。
+
+### 5.4 同じマシンから接続する場合
+
+HoshikageとCodexが同じマシン上で動き、`127.0.0.1`で接続できる場合はTokenが不要です。次の生成結果を5.1のOS別Codex利用者設定へ保存します。
+
+```bash
+hoshikage codex-config --model unsloth-gemma4-12b-qat-thinking-off
+```
+
+WSL内のHoshikageへWindowsアプリから接続する構成では、`127.0.0.1`で到達できるかを先に確認してください。到達できない場合はLAN接続と同じ認証付き構成を使用します。
+
+### 5.5 CLIで用途別に切り替える
+
+Codex CLIだけでHoshikageを選んで起動したい場合は、名前付きProfileを使えます。Profile名を`hoshikage`にする場合、Linux・macOS・WSLは`~/.codex/hoshikage.config.toml`、Windowsは`%USERPROFILE%\.codex\hoshikage.config.toml`へ生成結果を保存します。
+
+Linux・macOS・WSLで同一マシンのHoshikageを使う例です。
+
+```bash
+mkdir -p ~/.codex
+hoshikage codex-config \
+  --model unsloth-gemma4-12b-qat-thinking-off \
+  > ~/.codex/hoshikage.config.toml
+codex exec --profile hoshikage "Return exactly the word OK."
+```
+
+Windowsでは`%USERPROFILE%\.codex\hoshikage.config.toml`へ同じTOMLを保存し、PowerShellで次を実行します。
+
+```powershell
+codex exec --profile hoshikage "Return exactly the word OK."
+```
+
+Codex 0.134以降では、旧形式の`[profiles.hoshikage]`を使いません。Profileごとの独立した`hoshikage.config.toml`を使います。Windows版Codexアプリの通常利用は5.3の利用者設定を推奨します。
+
+### 5.6 対話用と無人用
+
+標準は対話用で`approval_policy = "on-request"`です。無人実行が必要な専用環境だけで次を使います。
+
+```bash
+hoshikage codex-config \
+  --model unsloth-gemma4-12b-qat-thinking-off \
+  --mode unattended
+```
+
+無人用は`approval_policy = "never"`を生成します。対話用設定を無人用へ流用せず、用途と実行環境を分離してください。Hoshikageは承認やsandboxを制御せず、Codex側が制御します。
+
+### 5.7 設定要素の違い
+
+- **Provider**: Hoshikage APIのURL、Responses wire、認証環境変数を定義します。
+- **Profile**: 使用モデル、Provider、承認方針、sandboxなどCodexの実行条件を定義します。
+- **Hoshikage server設定**: serverのbind、モデル、Token storeなどを定義します。Codex設定ではありません。
+- **process環境変数**: 上位アプリケーションがTokenを、設定ファイルへ直接書かずCodex child processへ渡します。
+- **モデルカタログ**: 上位アプリケーションが選択可能なBundleと能力を取得する機械可読一覧です。
+- **`AGENTS.md`**: 作業方針やリポジトリ固有指示です。接続先やモデルを選ぶ設定ではありません。
+
+モデル、Provider、Tokenの選択責務はCodexを起動するYatagarasuなどのアプリケーション層にあります。Hoshikageが上位アプリケーションの設定を変更することはありません。
+
+### 5.8 モデルカタログと接続診断
+
+```bash
+hoshikage codex-model-catalog --json
+hoshikage doctor \
+  --model unsloth-gemma4-12b-qat-thinking-off \
+  --codex-base-url http://127.0.0.1:3030/v1
+```
+
+カタログはすべてのBundleを列挙し、`codex_compatible`、context、Responses、streaming、toolsなどを返します。モデルファイルのpathやTokenは出力しません。
+
+Tool Callingが`disabled`ならCodexはテキスト応答だけ利用できます。Agent Loopでファイルやshell toolを使うには、Bundleに適切な`native`または`json` modeを設定し、`doctor`で確認してください。
+
+## 6. APIと状態確認
+
+### 6.1 エンドポイント
+
+- `GET /health`: 認証不要のliveness
+- `GET /ready`: 設定とruntimeのreadiness
+- `GET /v1/models`: OpenAI互換モデル一覧
+- `GET /v1/hoshikage/models`: Hoshikage能力付きモデル一覧
+- `GET /v1/status`: モデルロード状態
+- `POST /v1/chat/completions`: 既存Chat Completions
+- `POST /v1/responses`: Codex向けResponses API
+
+### 6.2 エラーとrequest ID
+
+Responses APIはOpenAI互換エラーを返し、`x-request-id` headerを付与します。問い合わせやログ照合では本文やTokenではなくrequest IDを使用してください。
+
+## 7. ログとdebug capture
+
+通常ログにはprompt、Tool引数、Tool結果、Tokenを記録しません。必要な診断情報はrequest ID、model、時間、token数、terminal statusなどの安全なsummaryです。
+
+本文が必要な短時間の障害調査だけで次を明示設定できます。
+
+```dotenv
+HOSHIKAGE_DEBUG_CAPTURE=on
+```
+
+captureはOS別Hoshikage設定directoryの`debug-capture`へrequest単位で保存され、Authorization、Token名のfield、metadataを除外します。既定保持は24時間、directory上限は100 MiB、Unixではdirectory `0700`、file `0600`です。起動時に警告されます。調査後は必ず`off`へ戻し、保存ファイルを機密情報として扱ってください。
+
+## 8. TLSとネットワーク
+
+Hoshikage自身のLAN接続はHTTPです。盗聴可能なネットワークや複数セグメントを越える場合は、Caddy、nginxなどのreverse proxyでTLSを終端し、Hoshikageはloopbackまたは保護された内部interfaceだけで待受けます。
+
+```text
+Codex -> HTTPS reverse proxy -> HTTP Hoshikage
+```
+
+reverse proxyでも`Authorization` headerをHoshikageへ転送し、request bodyをaccess logへ記録しないでください。WANへ直接公開しないでください。
+
+## 9. トラブルシューティング
+
+### 9.1 Codexが接続できない
+
+- `curl http://HOST:3030/health`でprocessを確認します。
+- `/ready`でruntime準備を確認します。
+- LANでは401診断手順を実施します。
+- Codex Providerの`base_url`が`/v1`まで含むか確認します。
+- `doctor --codex-base-url`で接続とモデル能力をまとめて確認します。
+
+### 9.2 Toolを使わない
+
+- `hoshikage codex-model-catalog --json`で`tools`を確認します。
+- Bundleの`tool_calling.mode`が`disabled`でないか確認します。
+- parserがモデルのchat templateと一致するか確認します。
+- contextが16K以上か確認します。
+- HoshikageはToolを実行しません。Codex側のTool Registry、approval、sandboxも確認します。
+
+### 9.3 言語を切り替える
+
+```bash
+hoshikage --language ja doctor
+hoshikage --language en doctor
+```
+
+優先順は`--language`、`HOSHIKAGE_LANG`、OS locale、英語fallbackです。エラーcode、JSON field、診断IDは言語に依存しません。

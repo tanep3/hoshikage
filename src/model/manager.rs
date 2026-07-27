@@ -400,12 +400,40 @@ fn available_bytes(path: &std::path::Path) -> Result<u64> {
     }
 
     let stat = unsafe { stat.assume_init() };
-    Ok(stat.f_bavail * stat.f_frsize)
+    let available_blocks = FilesystemUnsigned::into_u64(stat.f_bavail);
+    let block_size = FilesystemUnsigned::into_u64(stat.f_frsize);
+    checked_capacity_bytes(available_blocks, block_size)
 }
 
 #[cfg(not(target_family = "unix"))]
 fn available_bytes(_path: &std::path::Path) -> Result<u64> {
     Ok(u64::MAX)
+}
+
+#[cfg(target_family = "unix")]
+trait FilesystemUnsigned {
+    fn into_u64(self) -> u64;
+}
+
+#[cfg(target_family = "unix")]
+impl FilesystemUnsigned for u32 {
+    fn into_u64(self) -> u64 {
+        u64::from(self)
+    }
+}
+
+#[cfg(target_family = "unix")]
+impl FilesystemUnsigned for u64 {
+    fn into_u64(self) -> u64 {
+        self
+    }
+}
+
+#[cfg(any(target_family = "unix", test))]
+fn checked_capacity_bytes(blocks: u64, block_size: u64) -> Result<u64> {
+    blocks.checked_mul(block_size).ok_or_else(|| {
+        crate::error::HoshikageError::Other("available filesystem capacity exceeds u64".to_string())
+    })
 }
 
 #[cfg(test)]
@@ -414,6 +442,12 @@ mod ramdisk_tests {
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("hoshikage-{}-{}", name, uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn filesystem_capacity_calculation_rejects_overflow() {
+        assert_eq!(checked_capacity_bytes(4, 4096).unwrap(), 16_384);
+        assert!(checked_capacity_bytes(u64::MAX, 2).is_err());
     }
 
     fn write_file(path: &PathBuf, content: &str) {
@@ -776,11 +810,14 @@ pub struct LoadedRuntimeInfoSnapshot {
     pub speculation_fallback_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HoshikageModelInfo {
     pub id: String,
+    pub context_window: u32,
+    pub codex_compatible: bool,
     pub responses: bool,
     pub streaming: bool,
+    pub buffered_tool_classification: bool,
     pub tools: bool,
     pub main_model_configured: bool,
     pub vision: bool,
@@ -807,6 +844,32 @@ impl From<LoadedRuntimeInfo> for LoadedRuntimeInfoSnapshot {
             speculation_enabled: info.speculation_enabled,
             speculation_mode: info.speculation_mode,
             speculation_fallback_reason: info.speculation_fallback_reason,
+        }
+    }
+}
+
+impl HoshikageModelInfo {
+    fn from_bundle(id: String, config: ModelConfig, default_context_window: u32) -> Self {
+        Self {
+            id,
+            context_window: crate::codex::effective_context_window(&config, default_context_window),
+            codex_compatible: crate::codex::is_codex_compatible(&config, default_context_window),
+            responses: true,
+            streaming: true,
+            buffered_tool_classification: config.tool_calling.mode
+                == crate::model::ToolCallingMode::Json,
+            tools: config.tool_calling.mode != crate::model::ToolCallingMode::Disabled,
+            main_model_configured: !config.model.is_empty(),
+            vision: config.mmproj.is_some(),
+            mmproj_configured: config.mmproj.is_some(),
+            mtp_configured: config.speculation.has_mode(SpeculationMode::Mtp),
+            draft_model_configured: config.speculation.has_mode(SpeculationMode::DraftModel)
+                && config.drafter.is_some(),
+            thinking: config.thinking.mode,
+            fallback: config.speculation.fallback,
+            reasoning: false,
+            tool_calling_mode: config.tool_calling.mode,
+            tool_parser: config.tool_calling.effective_parser(),
         }
     }
 }
@@ -957,24 +1020,8 @@ impl ModelManager {
     pub async fn list_hoshikage_models(&self) -> Vec<HoshikageModelInfo> {
         let models = self.registry.snapshot().await;
         let mut data = models
-            .iter()
-            .map(|(name, config)| HoshikageModelInfo {
-                id: name.clone(),
-                responses: true,
-                streaming: true,
-                tools: config.tool_calling.mode != crate::model::ToolCallingMode::Disabled,
-                main_model_configured: !config.model.is_empty(),
-                vision: config.mmproj.is_some(),
-                mmproj_configured: config.mmproj.is_some(),
-                mtp_configured: config.speculation.has_mode(SpeculationMode::Mtp),
-                draft_model_configured: config.speculation.has_mode(SpeculationMode::DraftModel)
-                    && config.drafter.is_some(),
-                thinking: config.thinking.mode.clone(),
-                fallback: config.speculation.fallback.clone(),
-                reasoning: false,
-                tool_calling_mode: config.tool_calling.mode,
-                tool_parser: config.tool_calling.effective_parser(),
-            })
+            .into_iter()
+            .map(|(name, config)| HoshikageModelInfo::from_bundle(name, config, self.config.n_ctx))
             .collect::<Vec<_>>();
         data.sort_by(|a, b| a.id.cmp(&b.id));
         data
@@ -982,23 +1029,11 @@ impl ModelManager {
 
     pub async fn get_hoshikage_model(&self, name: &str) -> Result<HoshikageModelInfo> {
         let config = self.get_model(name).await?;
-        Ok(HoshikageModelInfo {
-            id: name.to_string(),
-            responses: true,
-            streaming: true,
-            tools: config.tool_calling.mode != crate::model::ToolCallingMode::Disabled,
-            main_model_configured: !config.model.is_empty(),
-            vision: config.mmproj.is_some(),
-            mmproj_configured: config.mmproj.is_some(),
-            mtp_configured: config.speculation.has_mode(SpeculationMode::Mtp),
-            draft_model_configured: config.speculation.has_mode(SpeculationMode::DraftModel)
-                && config.drafter.is_some(),
-            thinking: config.thinking.mode,
-            fallback: config.speculation.fallback,
-            reasoning: false,
-            tool_calling_mode: config.tool_calling.mode,
-            tool_parser: config.tool_calling.effective_parser(),
-        })
+        Ok(HoshikageModelInfo::from_bundle(
+            name.to_string(),
+            config,
+            self.config.n_ctx,
+        ))
     }
 
     pub fn runtime_status(&self) -> RuntimeStatusSnapshot {
@@ -1096,6 +1131,14 @@ impl ModelManager {
 
     pub fn responses_timeout_secs(&self) -> u64 {
         self.config.responses_timeout_secs
+    }
+
+    pub fn debug_capture_enabled(&self) -> bool {
+        self.config.debug_capture
+    }
+
+    pub fn debug_capture_path(&self) -> Result<PathBuf> {
+        self.config.debug_capture_path()
     }
 
     pub fn is_ready(&self) -> bool {

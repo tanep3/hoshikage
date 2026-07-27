@@ -450,15 +450,15 @@ codex exec --profile yatagarasu-local "Return exactly the word OK."
 4. Token、Tool 引数、Tool Result、instructions 本文を標準ログへ出力しない。
 5. 認証失敗はモデルロードや推論を開始する前に拒否する。
 6. CORS の既定値は LAN 公開を無制限に許可しない。
-7. `hoshikage auth token create --name <NAME>` は CSPRNG を用いた 256 bit 以上の Bearer Token を生成する。
-8. Token plaintext は生成時に 1 回だけ表示し、Hoshikage 側には plaintext ではなく検証用情報を保存する。
-9. 認証情報ファイルは Hoshikage 標準設定 directory 内へ保存し、Unix 系では owner のみ読書き可能な permission を要求する。
+7. `hoshikage token create <NAME>` は CSPRNG を用いた 256 bit 以上の Bearer Token を生成する。
+8. Token plaintext は生成時と管理者による`hoshikage token list`実行時に表示でき、Hoshikage 側の管理用recordへ復元可能な形で保存する。
+9. 認証情報ファイルは Hoshikage server の標準設定 directory 内へ保存する。Linux・macOSではownerのみ読書き可能なpermission、Windowsでは現在のownerとSYSTEMだけにfull controlを許可する保護ACLを要求する。
 10. Token はCodex、Yatagarasu、その他上位アプリケーション等の用途名付きで複数保持できる。
-11. Token名は一意とし、Token plaintextを表示せず一覧できる。
-12. `hoshikage auth token rotate --name <NAME>` は指定Tokenだけを再発行し、旧Tokenを即時無効化できる。
-13. `hoshikage auth token revoke --name <NAME>` は指定Tokenだけを無効化できる。
+11. Token名は一意とし、`hoshikage token list`はserver machine上の管理者用CLIとして、name、plaintext Token、public ID、作成日時、更新日時を一覧する。
+12. `hoshikage token rotate <NAME>` は指定Tokenだけを再発行し、旧Tokenを即時無効化できる。
+13. `hoshikage token revoke <NAME>` は指定Tokenだけを無効化できる。
 14. あるTokenのrotationまたはrevokeによって、他の用途名付きTokenを無効化しない。
-15. Codex および上位アプリケーションは plaintext Token を `HOSHIKAGE_API_KEY` 等の環境変数から取得できる。
+15. Codex および上位アプリケーションはserver側Token fileを直接参照せず、起動元のapplication layerがplaintext Tokenを`HOSHIKAGE_API_KEY`等のprocess環境変数として渡す。
 16. Token 未設定の non-loopback bind は起動時に fail-closed とする。
 17. LAN 内 HTTP では Token が暗号化されないことをユーザーマニュアルへ明記し、必要に応じて TLS reverse proxy を案内する。
 
@@ -602,6 +602,8 @@ codex exec --profile yatagarasu-local "Return exactly the word OK."
 11. CLIは`--language en|ja`等で言語を明示選択でき、未指定時は環境設定またはOS localeを参照し、判定不能時は英語へfallbackする。
 12. CLIのmachine-readable JSONに含むfield名、code、enum値は言語によって変更しない。
 13. 日本語版と英語版のマニュアルは同じ機能、警告、手順を扱い、一方だけをリリース時に古い状態へ残さない。
+14. Linux、macOS、Windowsを同格の利用環境として扱い、Hoshikage server側の設定場所と、上位application/Codex側の設定・環境変数を混同しない。
+15. `hoshikage token list`が管理者用操作としてplaintextを表示することと、端末出力を共有・記録しない注意を説明する。
 
 ---
 
@@ -957,7 +959,7 @@ Phase 2の非ストリームText、Phase 3のTool意味変換、Phase 4のSSEを
 | D-019 | 全 Bundle から Codex 用モデルカタログと制限値を生成し、利用者・上位アプリがモデルを選択 |
 | D-020 | 対話用 `on-request` と無人実行用 `never` を分離し、Yatagarasu に限定しない |
 | D-021 | Codex互換Bundleは16Kを最低保証、32K以上を推奨。8Kは対象外 |
-| D-022 | 用途名付き複数Tokenを持ち、rotate/revokeは対象Tokenだけへ即時適用 |
+| D-022 | 用途名付き複数Tokenを持ち、管理者listは全情報を表示し、rotate/revokeは対象Tokenだけへ即時適用 |
 | D-023 | livenessとは別に認証対象の`GET /ready`を提供 |
 | D-024 | API errorは英語固定。CLIとマニュアルは英語・日本語を正式対応 |
 | D-025 | Native Tool streamは出力種別確定まで待ち、確定後にstream |
@@ -1246,9 +1248,9 @@ Gemma 4 tokenizerで、5 Function Toolを含むCodex初回入力6,871 tokensを�
 
 ### D-022 Token管理単位
 
-**決定:** 用途名付きTokenを複数保持する。create、list、rotate、revokeはToken名を指定し、rotate/revokeは対象Tokenだけへ即時適用する。
+**決定:** 用途名付きTokenを複数保持する。create、list、rotate、revokeはserver machine上の管理者用CLIとする。listは管理に必要なToken plaintextを含む全情報を表示し、rotate/revokeは対象Tokenだけへ即時適用する。
 
-**理由:** Codex、Yatagarasu、将来の上位Agentを同じTokenへ結合すると、1用途の漏洩・rotationが全利用者の停止につながる。用途単位の失効範囲にする。
+**理由:** Codex、Yatagarasu、将来の上位Agentを同じTokenへ結合すると、1用途の漏洩・rotationが全利用者の停止につながる。用途単位の失効範囲にする。server machineへ管理者としてloginし、明示的にlistを実行した利用者には運用情報を隠さず、file permission・Windows ACL・API/log redactionを秘密情報の境界とする。
 
 ### D-023 Readiness endpoint
 
@@ -1339,7 +1341,7 @@ Tool Resultは既定では自動切り詰めせず、上限超過を明示エラ
 | Compatibility target | PASS | 検証済み minor 系列を明示し、対象 patch 版は Phase 0 で記録 |
 | Model target | PARTIAL | 2 Bundle 方針は確定。具体モデルと実測環境は Phase 0 で記録 |
 | Tool fallback policy | PASS | D-005 から D-009 で確定 |
-| セキュリティ方針 | PASS | 用途名付き複数Token、本文非記録、用途別承認方針を確定 |
+| セキュリティ方針 | PASS | 用途名付き複数Token、owner限定管理record、API/log秘匿、用途別承認方針を確定 |
 | Codex model limits | PASS | 全 Bundle のモデルカタログ生成と選択責務を確定 |
 | 言語方針 | PASS | API英語固定、CLIとマニュアルは英語・日本語を正式対応 |
 | 実用 context 下限 | PARTIAL | 候補値と方針は確定。正式保証値は Phase 0 の実測後に記録 |

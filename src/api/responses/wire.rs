@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::collections::{BTreeSet, HashSet};
 use thiserror::Error;
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct CompletedResponseWire {
     pub id: String,
     pub object: &'static str,
@@ -20,14 +20,14 @@ pub struct CompletedResponseWire {
     pub usage: UsageWire,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 #[serde(untagged)]
 pub enum CompletedOutputItemWire {
     Message(OutputMessageWire),
     FunctionCall(OutputFunctionCallWire),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct OutputMessageWire {
     pub id: String,
     pub r#type: &'static str,
@@ -36,7 +36,7 @@ pub struct OutputMessageWire {
     pub content: Vec<OutputContentWire>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct OutputFunctionCallWire {
     pub id: String,
     pub r#type: &'static str,
@@ -46,7 +46,7 @@ pub struct OutputFunctionCallWire {
     pub status: &'static str,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct OutputContentWire {
     pub r#type: &'static str,
     pub text: String,

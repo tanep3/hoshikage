@@ -26,6 +26,7 @@ base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 jsonschema = { version = "0.40", default-features = false }
+toml = "0.9"
 
 # 環境変数
 dotenvy = "0.15"
@@ -60,6 +61,16 @@ libloading = "0.8"
 
 [build-dependencies]
 bindgen = "0.69" # バージョンを安定版に指定
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Memory",
+    "Win32_System_SystemServices",
+] }
 
 [profile.release]
 opt-level = 3

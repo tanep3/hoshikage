@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::i18n::Language;
 use fs2::FileExt;
 use reqwest::Client;
 use serde::Deserialize;
@@ -19,7 +20,7 @@ async fn check_server_running(port: u16) -> bool {
         .unwrap_or(false)
 }
 
-async fn remove_via_api(port: u16, name: String) -> Result<()> {
+async fn remove_via_api(port: u16, name: String, language: Language) -> Result<()> {
     let url = format!("http://127.0.0.1:{}/admin/models/{}", port, name);
     let client = Client::new();
 
@@ -30,7 +31,10 @@ async fn remove_via_api(port: u16, name: String) -> Result<()> {
                 if response.status().is_success() {
                     let resp: RemoveModelResponse = response.json().await?;
                     if resp.success {
-                        println!("{}", resp.message);
+                        match language {
+                            Language::En => println!("Removed model: {name}"),
+                            Language::Ja => println!("モデルを削除しました: {name}"),
+                        }
                         return Ok(());
                     } else {
                         return Err(crate::error::HoshikageError::Other(resp.message));
@@ -54,7 +58,7 @@ async fn remove_via_api(port: u16, name: String) -> Result<()> {
     )))
 }
 
-fn remove_directly(name: String) -> Result<()> {
+fn remove_directly(name: String, language: Language) -> Result<()> {
     let config_dir = dirs::config_dir().ok_or_else(|| {
         crate::error::HoshikageError::ConfigError("Config directory not found".to_string())
     })?;
@@ -90,15 +94,18 @@ fn remove_directly(name: String) -> Result<()> {
     let new_content = serde_json::to_string_pretty(&models)?;
     std::fs::write(&model_map_path, &new_content)?;
 
-    println!("Removed model: {}", name);
+    match language {
+        Language::En => println!("Removed model: {name}"),
+        Language::Ja => println!("モデルを削除しました: {name}"),
+    }
     Ok(())
 }
 
-pub async fn remove_model(label: String, port: u16) -> Result<()> {
+pub async fn remove_model(label: String, port: u16, language: Language) -> Result<()> {
     if check_server_running(port).await {
-        remove_via_api(port, label).await
+        remove_via_api(port, label, language).await
     } else {
-        remove_directly(label)
+        remove_directly(label, language)
     }
 }
 

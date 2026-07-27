@@ -84,8 +84,8 @@ pub async fn hoshikage_model(
             Json(serde_json::json!({
                 "error": {
                     "code": "model_not_found",
-                    "message": "指定されたモデルが見つかりません",
-                    "type": "invalid_request",
+                    "message": "Model was not found",
+                    "type": "invalid_request_error",
                     "param": "model"
                 }
             })),

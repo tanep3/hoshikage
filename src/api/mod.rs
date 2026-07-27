@@ -36,7 +36,7 @@ pub fn create_router_with_auth(
 fn responses_service(
     manager: &Arc<crate::model::ModelManager>,
 ) -> Arc<crate::application::ResponsesService> {
-    Arc::new(crate::application::ResponsesService::new(
+    let mut service = crate::application::ResponsesService::new(
         Arc::new(crate::inference::ModelManagerGateway::new(manager.clone())),
         manager.responses_unknown_field_policy(),
         std::time::Duration::from_secs(manager.responses_timeout_secs()),
@@ -47,7 +47,32 @@ fn responses_service(
             max_tool_argument_bytes: manager.max_tool_argument_bytes(),
             max_tool_result_bytes: manager.max_tool_result_bytes(),
         },
-    ))
+    );
+    if manager.debug_capture_enabled() {
+        let capture = manager
+            .debug_capture_path()
+            .map_err(|error| error.to_string())
+            .and_then(|path| {
+                crate::observability::DebugCapture::new(path).map_err(|error| error.to_string())
+            });
+        match capture {
+            Ok(capture) => {
+                tracing::warn!(
+                    retention_hours = 24,
+                    directory_limit_mib = 100,
+                    "Debug capture is enabled; request and response bodies will be stored"
+                );
+                service = service.with_debug_capture(capture);
+            }
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "Debug capture was disabled because its private storage could not be initialized"
+                );
+            }
+        }
+    }
+    Arc::new(service)
 }
 
 fn protected_router(
@@ -89,8 +114,8 @@ mod auth_integration_tests {
     use super::*;
     use crate::config::Config;
     use crate::security::{
-        AuthPolicy, AuthState, FileTokenStore, SecretToken, TokenName, TokenStore,
-        TokenVerifierRecord,
+        AuthPolicy, AuthState, FileTokenStore, SecretToken, StoredTokenRecord, TokenName,
+        TokenStore,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Request, StatusCode};
@@ -132,7 +157,7 @@ mod auth_integration_tests {
         let name = TokenName::new("codex-lan").unwrap();
         let token = SecretToken::generate();
         store
-            .create(TokenVerifierRecord::new(&name, &token))
+            .create(StoredTokenRecord::new(&name, &token))
             .await
             .unwrap();
         let router = create_router_with_auth(

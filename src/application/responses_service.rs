@@ -1,12 +1,13 @@
 use super::response_stream::{ResponseEvent, ResponseMachine, ResponseMachineError, StreamFailure};
 use crate::config::UnknownFieldPolicy;
 use crate::conversation::{
-    CallId, Conversation, ModelId, OutputItemId, ResponseId, ToolArguments, ToolName,
+    CallId, Conversation, ModelId, OutputItemId, RequestId, ResponseId, ToolArguments, ToolName,
 };
 use crate::inference::{
     InferenceGateway, InferenceGatewayError, ModelCompletion, ModelRequest, ModelStreamAction,
     ModelToolSet, SamplingOptions, TokenUsage, ToolChoice,
 };
+use crate::observability::DebugCapture;
 use futures_util::{Stream, StreamExt};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -92,6 +93,7 @@ pub struct ResponsesService {
     unknown_field_policy: UnknownFieldPolicy,
     request_timeout: Duration,
     request_limits: ResponsesRequestLimits,
+    debug_capture: Option<DebugCapture>,
 }
 
 impl ResponsesService {
@@ -106,7 +108,17 @@ impl ResponsesService {
             unknown_field_policy,
             request_timeout,
             request_limits,
+            debug_capture: None,
         }
+    }
+
+    pub fn with_debug_capture(mut self, debug_capture: DebugCapture) -> Self {
+        self.debug_capture = Some(debug_capture);
+        self
+    }
+
+    pub fn debug_capture(&self) -> Option<DebugCapture> {
+        self.debug_capture.clone()
     }
 
     pub fn unknown_field_policy(&self) -> UnknownFieldPolicy {
@@ -121,6 +133,17 @@ impl ResponsesService {
         &self,
         request: NormalizedResponsesRequest,
     ) -> Result<CompletedResponse, ResponsesServiceError> {
+        self.execute_observed(request, new_request_id()?).await
+    }
+
+    pub async fn execute_observed(
+        &self,
+        request: NormalizedResponsesRequest,
+        request_id: RequestId,
+    ) -> Result<CompletedResponse, ResponsesServiceError> {
+        let started_at = std::time::Instant::now();
+        let model_name = request.model.as_str().to_string();
+        let tools_count = request.tools.tools().len();
         for field in &request.warnings {
             tracing::warn!(field, "Ignored unsupported Responses request field");
         }
@@ -133,12 +156,36 @@ impl ResponsesService {
             max_output_tokens: request.max_output_tokens,
             stream: false,
         };
-        let completion = tokio::time::timeout(
+        let completion = match tokio::time::timeout(
             self.request_timeout,
             self.gateway.complete(&model, model_request),
         )
         .await
-        .map_err(|_| InferenceGatewayError::UpstreamTimeout)??;
+        {
+            Ok(Ok(completion)) => completion,
+            Ok(Err(error)) => {
+                log_request_failure(
+                    &request_id,
+                    &model_name,
+                    false,
+                    tools_count,
+                    started_at,
+                    inference_error_class(&error),
+                );
+                return Err(error.into());
+            }
+            Err(_) => {
+                log_request_failure(
+                    &request_id,
+                    &model_name,
+                    false,
+                    tools_count,
+                    started_at,
+                    "upstream_timeout",
+                );
+                return Err(InferenceGatewayError::UpstreamTimeout.into());
+            }
+        };
         let (output, usage) = match completion {
             ModelCompletion::Text { content, usage } => (
                 CompletedOutput::Message(CompletedMessage {
@@ -161,20 +208,46 @@ impl ResponsesService {
                 usage,
             ),
         };
-        Ok(CompletedResponse {
+        let response = CompletedResponse {
             id: ResponseId::new(format!("resp_{}", uuid::Uuid::new_v4().simple()))
                 .map_err(|_| ResponsesServiceError::Identity)?,
             created_at: chrono::Utc::now().timestamp(),
             model,
             output,
             usage,
-        })
+        };
+        let (input_tokens, output_tokens) = usage_counts(&response.usage);
+        tracing::info!(
+            request_id = request_id.as_str(),
+            response_id = response.id.as_str(),
+            model = model_name,
+            stream = false,
+            tools_count,
+            input_tokens,
+            output_tokens,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            terminal = "completed",
+            "Responses request completed"
+        );
+        Ok(response)
     }
 
     pub async fn execute_stream(
         &self,
         request: NormalizedResponsesRequest,
     ) -> Result<ResponseEventStream, ResponsesServiceError> {
+        self.execute_stream_observed(request, new_request_id()?)
+            .await
+    }
+
+    pub async fn execute_stream_observed(
+        &self,
+        request: NormalizedResponsesRequest,
+        request_id: RequestId,
+    ) -> Result<ResponseEventStream, ResponsesServiceError> {
+        let started_at = std::time::Instant::now();
+        let model_name = request.model.as_str().to_string();
+        let tools_count = request.tools.tools().len();
         for field in &request.warnings {
             tracing::warn!(field, "Ignored unsupported Responses request field");
         }
@@ -186,14 +259,39 @@ impl ResponsesService {
             max_output_tokens: request.max_output_tokens,
             stream: true,
         };
-        let upstream = tokio::time::timeout(
+        let upstream = match tokio::time::timeout(
             self.request_timeout,
             self.gateway.stream(&request.model, model_request),
         )
         .await
-        .map_err(|_| InferenceGatewayError::UpstreamTimeout)??;
+        {
+            Ok(Ok(upstream)) => upstream,
+            Ok(Err(error)) => {
+                log_request_failure(
+                    &request_id,
+                    &model_name,
+                    true,
+                    tools_count,
+                    started_at,
+                    inference_error_class(&error),
+                );
+                return Err(error.into());
+            }
+            Err(_) => {
+                log_request_failure(
+                    &request_id,
+                    &model_name,
+                    true,
+                    tools_count,
+                    started_at,
+                    "upstream_timeout",
+                );
+                return Err(InferenceGatewayError::UpstreamTimeout.into());
+            }
+        };
         let response_id = ResponseId::new(format!("resp_{}", uuid::Uuid::new_v4().simple()))
             .map_err(|_| ResponsesServiceError::Identity)?;
+        let observed_response_id = response_id.clone();
 
         let stream = async_stream::stream! {
             let mut upstream = upstream;
@@ -214,6 +312,17 @@ impl ResponsesService {
                     Ok(action) => action,
                     Err(error) => {
                         let failure = stream_failure(&error);
+                        tracing::warn!(
+                            request_id = request_id.as_str(),
+                            response_id = observed_response_id.as_str(),
+                            model = model_name,
+                            stream = true,
+                            tools_count,
+                            elapsed_ms = started_at.elapsed().as_millis(),
+                            terminal = "failed",
+                            error_class = failure.code,
+                            "Responses request failed"
+                        );
                         if let Ok(events) = machine.fail(failure) {
                             for event in events {
                                 yield Ok(event);
@@ -222,6 +331,21 @@ impl ResponsesService {
                         return;
                     }
                 };
+                if let ModelStreamAction::Complete { usage } = &action {
+                    let (input_tokens, output_tokens) = usage_counts(usage);
+                    tracing::info!(
+                        request_id = request_id.as_str(),
+                        response_id = observed_response_id.as_str(),
+                        model = model_name,
+                        stream = true,
+                        tools_count,
+                        input_tokens,
+                        output_tokens,
+                        elapsed_ms = started_at.elapsed().as_millis(),
+                        terminal = "completed",
+                        "Responses request completed"
+                    );
+                }
                 let events = apply_stream_action(&mut machine, action);
                 match events {
                     Ok(events) => {
@@ -230,6 +354,17 @@ impl ResponsesService {
                         }
                     }
                     Err(_) => {
+                        tracing::warn!(
+                            request_id = request_id.as_str(),
+                            response_id = observed_response_id.as_str(),
+                            model = model_name,
+                            stream = true,
+                            tools_count,
+                            elapsed_ms = started_at.elapsed().as_millis(),
+                            terminal = "failed",
+                            error_class = "response_translation_failed",
+                            "Responses request failed"
+                        );
                         if let Ok(events) = machine.fail(StreamFailure {
                             code: "response_translation_failed",
                             message: "Response translation failed",
@@ -243,6 +378,17 @@ impl ResponsesService {
                 }
             }
             if !machine.is_terminal() {
+                tracing::warn!(
+                    request_id = request_id.as_str(),
+                    response_id = observed_response_id.as_str(),
+                    model = model_name,
+                    stream = true,
+                    tools_count,
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    terminal = "failed",
+                    error_class = "upstream_disconnected",
+                    "Responses request failed"
+                );
                 if let Ok(events) = machine.fail(StreamFailure {
                     code: "upstream_disconnected",
                     message: "Upstream disconnected",
@@ -254,6 +400,61 @@ impl ResponsesService {
             }
         };
         Ok(Box::pin(stream))
+    }
+}
+
+fn new_request_id() -> Result<RequestId, ResponsesServiceError> {
+    RequestId::new(format!("req_{}", uuid::Uuid::new_v4().simple()))
+        .map_err(|_| ResponsesServiceError::Identity)
+}
+
+fn usage_counts(usage: &TokenUsage) -> (u32, u32) {
+    match usage {
+        TokenUsage::Measured {
+            input_tokens,
+            output_tokens,
+        }
+        | TokenUsage::Estimated {
+            input_tokens,
+            output_tokens,
+        } => (*input_tokens, *output_tokens),
+    }
+}
+
+fn log_request_failure(
+    request_id: &RequestId,
+    model: &str,
+    stream: bool,
+    tools_count: usize,
+    started_at: std::time::Instant,
+    error_class: &str,
+) {
+    tracing::warn!(
+        request_id = request_id.as_str(),
+        model,
+        stream,
+        tools_count,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        terminal = "failed",
+        error_class,
+        "Responses request failed"
+    );
+}
+
+fn inference_error_class(error: &InferenceGatewayError) -> &'static str {
+    match error {
+        InferenceGatewayError::ModelNotFound => "model_not_found",
+        InferenceGatewayError::ModelLoadFailed => "model_load_failed",
+        InferenceGatewayError::ToolCallingNotSupported => "tool_calling_not_supported",
+        InferenceGatewayError::InvalidToolSchema => "invalid_tool_schema",
+        InferenceGatewayError::InvalidToolArguments => "invalid_tool_arguments",
+        InferenceGatewayError::ToolChoiceViolation => "tool_choice_violation",
+        InferenceGatewayError::ContextLengthExceeded => "context_length_exceeded",
+        InferenceGatewayError::ServerBusy => "server_busy",
+        InferenceGatewayError::UpstreamTimeout => "upstream_timeout",
+        InferenceGatewayError::UpstreamDisconnected => "upstream_disconnected",
+        InferenceGatewayError::GenerationFailed => "generation_failed",
+        InferenceGatewayError::TranslationFailed => "response_translation_failed",
     }
 }
 
@@ -429,5 +630,21 @@ mod tests {
             error,
             ResponsesServiceError::Inference(InferenceGatewayError::UpstreamTimeout)
         ));
+    }
+
+    #[test]
+    fn observability_uses_stable_error_classes() {
+        assert_eq!(
+            inference_error_class(&InferenceGatewayError::ModelNotFound),
+            "model_not_found"
+        );
+        assert_eq!(
+            inference_error_class(&InferenceGatewayError::ServerBusy),
+            "server_busy"
+        );
+        assert_eq!(
+            inference_error_class(&InferenceGatewayError::TranslationFailed),
+            "response_translation_failed"
+        );
     }
 }

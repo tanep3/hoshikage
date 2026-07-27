@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::i18n::Language;
 use crate::{
     commands::doctor::check_candidate_model,
     model::{
@@ -54,6 +55,7 @@ pub struct AddModelOptions {
     pub n_gpu_layers: Option<i32>,
     pub check: bool,
     pub port: u16,
+    pub language: Language,
 }
 
 async fn check_server_running(port: u16) -> bool {
@@ -66,7 +68,12 @@ async fn check_server_running(port: u16) -> bool {
         .unwrap_or(false)
 }
 
-async fn add_via_api(port: u16, name: String, config: ModelConfig) -> Result<()> {
+async fn add_via_api(
+    port: u16,
+    name: String,
+    config: ModelConfig,
+    language: Language,
+) -> Result<()> {
     let url = format!("http://127.0.0.1:{}/admin/models", port);
     let client = Client::new();
 
@@ -93,7 +100,13 @@ async fn add_via_api(port: u16, name: String, config: ModelConfig) -> Result<()>
                 if response.status().is_success() {
                     let resp: AddModelResponse = response.json().await?;
                     if resp.success {
-                        println!("{}", resp.message);
+                        println!(
+                            "{}",
+                            match language {
+                                Language::En => format!("Added model: {name}"),
+                                Language::Ja => format!("モデルを追加しました: {name}"),
+                            }
+                        );
                         return Ok(());
                     } else {
                         return Err(crate::error::HoshikageError::Other(resp.message));
@@ -117,7 +130,7 @@ async fn add_via_api(port: u16, name: String, config: ModelConfig) -> Result<()>
     )))
 }
 
-fn add_directly(name: String, config: ModelConfig) -> Result<()> {
+fn add_directly(name: String, config: ModelConfig, language: Language) -> Result<()> {
     let config_dir = dirs::config_dir().ok_or_else(|| {
         crate::error::HoshikageError::ConfigError("Config directory not found".to_string())
     })?;
@@ -150,7 +163,10 @@ fn add_directly(name: String, config: ModelConfig) -> Result<()> {
     let content = serde_json::to_string_pretty(&models)?;
     std::fs::write(&model_map_path, &content)?;
 
-    println!("Added model: {}", name);
+    match language {
+        Language::En => println!("Added model: {name}"),
+        Language::Ja => println!("モデルを追加しました: {name}"),
+    }
     Ok(())
 }
 
@@ -167,6 +183,7 @@ pub async fn add_model(options: AddModelOptions) -> Result<()> {
         n_gpu_layers,
         check,
         port,
+        language,
     } = options;
     let file_path = PathBuf::from(&path);
 
@@ -228,16 +245,16 @@ pub async fn add_model(options: AddModelOptions) -> Result<()> {
         ..ModelConfig::new_legacy(parent_dir, file_name, stop_words)
     };
 
-    if check && !check_candidate_model(&label, &config)? {
+    if check && !check_candidate_model(&label, &config, language)? {
         return Err(crate::error::HoshikageError::ConfigError(
             "Model bundle check failed; registration was not saved".to_string(),
         ));
     }
 
     if check_server_running(port).await {
-        add_via_api(port, label, config).await
+        add_via_api(port, label, config, language).await
     } else {
-        add_directly(label, config)
+        add_directly(label, config, language)
     }
 }
 

@@ -2,11 +2,14 @@ pub mod api;
 pub mod application;
 pub mod config;
 pub mod conversation;
+pub mod i18n;
 pub mod inference;
 pub mod model;
+pub mod observability;
 pub mod runtime;
 pub mod security;
 
+pub mod codex;
 pub mod commands;
 
 #[allow(

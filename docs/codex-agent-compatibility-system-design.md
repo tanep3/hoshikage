@@ -1544,10 +1544,11 @@ hsk_<public token id>_<base64url 32 random bytes>
 - 256 bit以上
 - prefixとpublic token IDは識別用で秘密強度に含めない
 - public token IDもCSPRNG由来の128 bit値とし、secretとは独立生成
-- plaintextはcreate/rotate時に1回だけ表示
-- Hoshikageはdigestだけを保存
+- plaintextはcreate/rotate時と、server machine上の管理者による`token list`実行時に表示
+- Hoshikageは復元可能な管理用recordをowner限定領域へ保存
+- request認証層には管理用recordから導出したdigest-only `TokenVerifierSet`だけを渡す
 
-Tokenが十分なentropyを持つため、server側verifierはsalt付きpassword hashではなくSHA-256等の固定長digestでよい。比較にはconstant-time比較を使用する。Token値を`Debug`表示しない`SecretToken`型で包み、不要になったbufferはzeroizeする。
+Tokenが十分なentropyを持つため、request認証用verifierはsalt付きpassword hashではなくSHA-256等の固定長digestでよい。比較にはconstant-time比較を使用する。保存用`StoredTokenRecord`と認証用`TokenVerifierSet`を別型にし、middleware、API、通常logへplaintextを渡さない。Token値を`Debug`表示しない`SecretToken`型で包み、不要になったbufferはzeroizeする。
 
 ### 16.3 TokenStore
 
@@ -1565,9 +1566,13 @@ pub trait TokenStore: Send + Sync {
 }
 ```
 
-実ファイルはtemporary file作成、permission設定、fsync、renameの順で原子的に更新する。Unixは`0600`を要求する。Windowsは標準config directoryへ保存し、利用可能なACL APIで現在利用者とSYSTEM以外の書込み権限を検査する。安全性を検証できない保存先では警告だけで続行せず、明示的なoverrideなしにはTokenを作成・利用しない。マニュアル確認を唯一の防護にしない。
+実ファイルはtemporary file作成、permission/ACL設定、本文書込み、fsync、renameの順で原子的に更新する。Linux・macOSは`0600`を要求する。Windowsは標準config directoryへ保存し、ownerとSYSTEMだけにfull controlを許可するprotected DACLを設定・検証する。安全性を検証できない保存先では警告だけで続行せず、Tokenを作成・利用しない。マニュアル確認を唯一の防護にしない。
 
-Token名は`[a-z0-9][a-z0-9._-]{0,63}`の検証済み`TokenName`とし、一意にする。Codex、Yatagarasu、その他上位アプリケーションごとに用途名付きTokenを作成できる。listはname、public ID、作成・更新日時だけを返し、secretやdigestを返さない。
+Token名は`[a-z0-9][a-z0-9._-]{0,63}`の検証済み`TokenName`とし、一意にする。Codex、Yatagarasu、その他上位アプリケーションごとに用途名付きTokenを作成できる。`token list`はserver machine上の管理者用CLIであり、name、plaintext Token、public ID、作成・更新日時を返す。digestは内部検証情報であり表示しない。server API、Doctor、model catalog、debug captureはplaintextを返さない。
+
+旧version 1のdigest-only recordは認証を継続できるが、plaintextは数学的に復元できない。listでは`<unavailable: rotate required>`と明示し、その用途名をrotateすると復元可能なversion 2 recordへ移行する。
+
+上位applicationはserver側Token fileを直接参照しない。Yatagarasu等の起動元が、選択したTokenを`HOSHIKAGE_API_KEY`等の環境変数としてCodex child processへ渡す。Windows利用者環境変数への永続登録はWindows版Codex appを直接起動する場合の一手段であり、標準的なapplication統合契約ではない。
 
 rotateは指定名の新verifier保存成功後に、そのTokenの旧verifierだけを即時無効化する。revokeも指定Tokenだけへ適用し、他Tokenへ影響させない。初期版ではgrace periodを設けない。未知public IDの場合もdummy digestとのconstant-time比較を行い、存在有無を比較時間から推測しにくくする。
 
@@ -1765,13 +1770,13 @@ JSON repair、semantic regeneration、model load、queue waitを通常の変換�
 ### 19.1 認証
 
 ```bash
-hoshikage auth token create --name codex-desktop
-hoshikage auth token list
-hoshikage auth token rotate --name codex-desktop
-hoshikage auth token revoke --name codex-desktop
+hoshikage token create codex-desktop
+hoshikage token list
+hoshikage token rotate codex-desktop
+hoshikage token revoke codex-desktop
 ```
 
-CLIはToken plaintextをJSON logやtracingへ渡さない。`--json`を将来追加する場合もplaintextを含む出力の危険を明示する。
+create、rotate、listのplaintextは管理者が要求した標準出力だけへ書き、JSON logやtracingへ渡さない。`--json`を将来追加する場合もplaintextを含む出力の危険を明示する。
 
 ### 19.2 CLI言語
 
@@ -2263,9 +2268,9 @@ Phase 7は本設計の初期実装対象外である。
 
 ### SD-008 認証
 
-**決定:** 高entropy Tokenのdigestを、用途名とpublic token IDを持つ複数recordとして保存する。rotate/revokeは指定Tokenだけへ即時適用する。
+**決定:** 高entropy Tokenを用途名とpublic token IDを持つ復元可能な管理用recordとしてowner限定領域へ保存し、認証層へはdigest-only snapshotを渡す。管理者用`token list`はplaintextを含む全情報を表示し、rotate/revokeは指定Tokenだけへ即時適用する。
 
-**理由:** Codex、Yatagarasu、将来の上位Agentを個別に失効でき、1用途のrotationで全利用者を停止させない。初期版は小さな原子的file storeとし、Token DBやgrace periodは導入しない。
+**理由:** Codex、Yatagarasu、将来の上位Agentを個別に失効でき、1用途のrotationで全利用者を停止させない。server machineの管理者へ運用情報を隠さず、管理recordとrequest認証型を分離してAPI/logへの漏えいを防ぐ。初期版はOS権限で保護した小さな原子的file storeとし、Token DBやgrace periodは導入しない。
 
 ### SD-009 ModelManager
 
