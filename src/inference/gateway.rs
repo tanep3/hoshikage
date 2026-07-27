@@ -1,8 +1,14 @@
-use super::{ModelCompletion, ModelRequest};
+use super::{ModelCompletion, ModelRequest, ModelStreamAction};
 use crate::conversation::ModelId;
 use async_trait::async_trait;
+use futures_util::Stream;
+use futures_util::StreamExt;
+use std::pin::Pin;
 use std::sync::Arc;
 use thiserror::Error;
+
+pub type ModelActionStream =
+    Pin<Box<dyn Stream<Item = Result<ModelStreamAction, InferenceGatewayError>> + Send>>;
 
 #[derive(Debug, Error)]
 pub enum InferenceGatewayError {
@@ -39,6 +45,14 @@ pub trait InferenceGateway: Send + Sync {
         model: &ModelId,
         request: ModelRequest,
     ) -> Result<ModelCompletion, InferenceGatewayError>;
+
+    async fn stream(
+        &self,
+        _model: &ModelId,
+        _request: ModelRequest,
+    ) -> Result<ModelActionStream, InferenceGatewayError> {
+        Err(InferenceGatewayError::GenerationFailed)
+    }
 }
 
 pub struct ModelManagerGateway {
@@ -61,45 +75,61 @@ impl InferenceGateway for ModelManagerGateway {
         self.manager
             .complete_model_request(model, request)
             .await
-            .map_err(|error| match error {
-                crate::error::HoshikageError::ModelNotFound(_) => {
-                    InferenceGatewayError::ModelNotFound
-                }
-                crate::error::HoshikageError::ModelLoadFailed(_)
-                | crate::error::HoshikageError::ConfigError(_)
-                | crate::error::HoshikageError::LibraryLoadError(_) => {
-                    InferenceGatewayError::ModelLoadFailed
-                }
-                crate::error::HoshikageError::ServerBusy => InferenceGatewayError::ServerBusy,
-                crate::error::HoshikageError::ContextLengthExceeded => {
-                    InferenceGatewayError::ContextLengthExceeded
-                }
-                crate::error::HoshikageError::ToolCallingNotSupported => {
-                    InferenceGatewayError::ToolCallingNotSupported
-                }
-                crate::error::HoshikageError::InvalidToolSchema => {
-                    InferenceGatewayError::InvalidToolSchema
-                }
-                crate::error::HoshikageError::InvalidToolArguments
-                | crate::error::HoshikageError::MultipleToolCalls => {
-                    InferenceGatewayError::InvalidToolArguments
-                }
-                crate::error::HoshikageError::ToolChoiceViolation => {
-                    InferenceGatewayError::ToolChoiceViolation
-                }
-                crate::error::HoshikageError::SerdeError(_) => {
-                    InferenceGatewayError::TranslationFailed
-                }
-                crate::error::HoshikageError::ResponseTranslationFailed => {
-                    InferenceGatewayError::TranslationFailed
-                }
-                crate::error::HoshikageError::HttpError(error) if error.is_timeout() => {
-                    InferenceGatewayError::UpstreamTimeout
-                }
-                crate::error::HoshikageError::HttpError(_) => {
-                    InferenceGatewayError::UpstreamDisconnected
-                }
-                _ => InferenceGatewayError::GenerationFailed,
-            })
+            .map_err(map_hoshikage_error)
+    }
+
+    async fn stream(
+        &self,
+        model: &ModelId,
+        request: ModelRequest,
+    ) -> Result<ModelActionStream, InferenceGatewayError> {
+        let stream = self
+            .manager
+            .stream_model_request(model, request)
+            .await
+            .map_err(map_hoshikage_error)?;
+        Ok(Box::pin(
+            stream.map(|result| result.map_err(map_hoshikage_error)),
+        ))
+    }
+}
+
+fn map_hoshikage_error(error: crate::error::HoshikageError) -> InferenceGatewayError {
+    match error {
+        crate::error::HoshikageError::ModelNotFound(_) => InferenceGatewayError::ModelNotFound,
+        crate::error::HoshikageError::ModelLoadFailed(_)
+        | crate::error::HoshikageError::ConfigError(_)
+        | crate::error::HoshikageError::LibraryLoadError(_) => {
+            InferenceGatewayError::ModelLoadFailed
+        }
+        crate::error::HoshikageError::ServerBusy => InferenceGatewayError::ServerBusy,
+        crate::error::HoshikageError::ContextLengthExceeded => {
+            InferenceGatewayError::ContextLengthExceeded
+        }
+        crate::error::HoshikageError::ToolCallingNotSupported => {
+            InferenceGatewayError::ToolCallingNotSupported
+        }
+        crate::error::HoshikageError::InvalidToolSchema => InferenceGatewayError::InvalidToolSchema,
+        crate::error::HoshikageError::InvalidToolArguments
+        | crate::error::HoshikageError::MultipleToolCalls => {
+            InferenceGatewayError::InvalidToolArguments
+        }
+        crate::error::HoshikageError::ToolChoiceViolation => {
+            InferenceGatewayError::ToolChoiceViolation
+        }
+        crate::error::HoshikageError::SerdeError(_) => InferenceGatewayError::TranslationFailed,
+        crate::error::HoshikageError::ResponseTranslationFailed => {
+            InferenceGatewayError::TranslationFailed
+        }
+        crate::error::HoshikageError::GenerationFailed => InferenceGatewayError::GenerationFailed,
+        crate::error::HoshikageError::UpstreamDisconnected => {
+            InferenceGatewayError::UpstreamDisconnected
+        }
+        crate::error::HoshikageError::UpstreamTimeout => InferenceGatewayError::UpstreamTimeout,
+        crate::error::HoshikageError::HttpError(error) if error.is_timeout() => {
+            InferenceGatewayError::UpstreamTimeout
+        }
+        crate::error::HoshikageError::HttpError(_) => InferenceGatewayError::UpstreamDisconnected,
+        _ => InferenceGatewayError::GenerationFailed,
     }
 }

@@ -35,6 +35,15 @@ pub enum HoshikageError {
     #[error("response translation failed")]
     ResponseTranslationFailed,
 
+    #[error("generation failed")]
+    GenerationFailed,
+
+    #[error("upstream disconnected")]
+    UpstreamDisconnected,
+
+    #[error("upstream timed out")]
+    UpstreamTimeout,
+
     #[error("context length exceeded")]
     ContextLengthExceeded,
 

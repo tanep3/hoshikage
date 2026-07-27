@@ -182,12 +182,6 @@ pub fn decode_request_with_limits(
     }
     warnings.sort();
 
-    if object.get("stream").and_then(Value::as_bool) == Some(true) {
-        return Err(unsupported(
-            "stream",
-            "streaming Responses are not available in this release phase",
-        ));
-    }
     if object
         .get("stream")
         .is_some_and(|stream| !stream.is_null() && !stream.is_boolean())
@@ -295,6 +289,10 @@ pub fn decode_request_with_limits(
         }
         None => 1024,
     };
+    let stream = object
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     Ok(crate::application::NormalizedResponsesRequest {
         model,
@@ -303,6 +301,7 @@ pub fn decode_request_with_limits(
         tool_choice,
         sampling,
         max_output_tokens,
+        stream,
         warnings,
     })
 }
@@ -814,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_is_rejected_until_sse_phase() {
+    fn streaming_flag_is_preserved_for_the_sse_service_path() {
         let stream = decode_request(
             serde_json::json!({
                 "model": "gemma4",
@@ -823,10 +822,8 @@ mod tests {
             }),
             UnknownFieldPolicy::Compatible,
         )
-        .err()
         .unwrap();
-        assert_eq!(stream.code, "unsupported_parameter");
-        assert_eq!(stream.param.as_deref(), Some("stream"));
+        assert!(stream.stream);
     }
 
     #[test]

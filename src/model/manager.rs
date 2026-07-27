@@ -6,7 +6,8 @@ use crate::inference::{
     parse_generic_json_completion, validate_native_completion, validate_tool_request,
     ContextAccuracy, ContextPlan, LlamaFfiBackend, LlamaLoadRequest, LlamaServerChatDefaults,
     LlamaServerClient, LlamaServerCommandSpec, LlamaServerLaunchConfig, LlamaServerProcess,
-    LoadedRuntimeInfo, ModelCompletion, ModelRequest, RuntimeBackend, ThinkingController,
+    LlamaServerSseDecoder, LoadedRuntimeInfo, ModelCompletion, ModelDelta, ModelFinishReason,
+    ModelRequest, ModelStreamAction, NativeStreamStrategy, RuntimeBackend, ThinkingController,
     ThinkingStreamFilter, TokenUsage,
 };
 use crate::model::tool_calling::ToolCallingConfig;
@@ -228,6 +229,161 @@ fn semantic_retry_mode(
         }
         crate::model::ToolCallingMode::Json => Some(crate::model::ToolCallingMode::Json),
         crate::model::ToolCallingMode::Native | crate::model::ToolCallingMode::Disabled => None,
+    }
+}
+
+fn should_retry_stream_semantic_error(
+    error: &crate::error::HoshikageError,
+    emitted_actions: bool,
+    config: &ModelConfig,
+    primary: crate::model::ToolCallingMode,
+) -> bool {
+    !emitted_actions
+        && is_semantic_tool_error(error)
+        && semantic_retry_mode(config, primary) == Some(crate::model::ToolCallingMode::Json)
+        && primary == crate::model::ToolCallingMode::Native
+}
+
+fn buffered_completion_actions(completion: ModelCompletion) -> Vec<ModelStreamAction> {
+    match completion {
+        ModelCompletion::Text { content, usage } => vec![
+            ModelStreamAction::BeginText,
+            ModelStreamAction::AppendText(content),
+            ModelStreamAction::FinishText,
+            ModelStreamAction::Complete { usage },
+        ],
+        ModelCompletion::ToolCall { call, usage } => vec![
+            ModelStreamAction::BeginFunctionCall { name: call.name },
+            ModelStreamAction::AppendArguments(call.arguments),
+            ModelStreamAction::FinishFunctionCall,
+            ModelStreamAction::Complete { usage },
+        ],
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BufferedRetryLimits {
+    context_window: u32,
+    first_timeout: Duration,
+    generation_timeout: Duration,
+}
+
+async fn execute_buffered_json_stream_retry(
+    client: &LlamaServerClient,
+    endpoint: &RuntimeEndpoint,
+    body: &serde_json::Value,
+    request: &ModelRequest,
+    model_config: &ModelConfig,
+    limits: BufferedRetryLimits,
+) -> Result<ModelCompletion> {
+    #[derive(Deserialize)]
+    struct InputTokensResponse {
+        input_tokens: u32,
+    }
+
+    let token_response = tokio::time::timeout(
+        limits.first_timeout,
+        client.chat_input_tokens(endpoint, body),
+    )
+    .await
+    .map_err(|_| crate::error::HoshikageError::UpstreamTimeout)??;
+    if !token_response.status().is_success() {
+        return Err(crate::error::HoshikageError::InferenceError(format!(
+            "llama-server returned HTTP {} while planning JSON fallback",
+            token_response.status()
+        )));
+    }
+    let input_tokens = token_response
+        .json::<InputTokensResponse>()
+        .await
+        .map_err(|_| crate::error::HoshikageError::ResponseTranslationFailed)?
+        .input_tokens;
+    if input_tokens.saturating_add(request.max_output_tokens) > limits.context_window {
+        return Err(crate::error::HoshikageError::ContextLengthExceeded);
+    }
+
+    let response = tokio::time::timeout(
+        limits.first_timeout,
+        client.chat_completions(endpoint, body),
+    )
+    .await
+    .map_err(|_| crate::error::HoshikageError::UpstreamTimeout)??;
+    if !response.status().is_success() {
+        return Err(crate::error::HoshikageError::InferenceError(format!(
+            "llama-server returned HTTP {} during JSON fallback",
+            response.status()
+        )));
+    }
+    let bytes = tokio::time::timeout(limits.generation_timeout, response.bytes())
+        .await
+        .map_err(|_| crate::error::HoshikageError::UpstreamTimeout)?
+        .map_err(|_| crate::error::HoshikageError::UpstreamDisconnected)?;
+    let completion = parse_generic_json_completion(
+        parse_chat_response(&bytes)?,
+        model_config.tool_calling.repair_invalid_json,
+    )?;
+    validate_native_completion(completion, request, model_config)
+}
+
+#[cfg(test)]
+mod stream_retry_tests {
+    use super::*;
+
+    fn native_with_json_fallback() -> ModelConfig {
+        ModelConfig {
+            path: String::new(),
+            model: "model.gguf".to_string(),
+            stop: Vec::new(),
+            mmproj: None,
+            drafter: None,
+            speculation: SpeculationConfig::default(),
+            thinking: ThinkingConfig::default(),
+            tool_calling: ToolCallingConfig {
+                mode: crate::model::ToolCallingMode::Native,
+                fallback: crate::model::ToolFallback::Json,
+                ..ToolCallingConfig::default()
+            },
+            n_ctx: Some(16_384),
+            n_gpu_layers: None,
+        }
+    }
+
+    #[test]
+    fn retries_native_semantic_failure_only_before_output_is_emitted() {
+        let config = native_with_json_fallback();
+        let error = crate::error::HoshikageError::ToolChoiceViolation;
+
+        assert!(should_retry_stream_semantic_error(
+            &error,
+            false,
+            &config,
+            crate::model::ToolCallingMode::Native,
+        ));
+        assert!(!should_retry_stream_semantic_error(
+            &error,
+            true,
+            &config,
+            crate::model::ToolCallingMode::Native,
+        ));
+    }
+
+    #[test]
+    fn does_not_retry_transport_failure_or_disabled_fallback() {
+        let mut config = native_with_json_fallback();
+        assert!(!should_retry_stream_semantic_error(
+            &crate::error::HoshikageError::UpstreamDisconnected,
+            false,
+            &config,
+            crate::model::ToolCallingMode::Native,
+        ));
+
+        config.tool_calling.fallback = crate::model::ToolFallback::None;
+        assert!(!should_retry_stream_semantic_error(
+            &crate::error::HoshikageError::ToolChoiceViolation,
+            false,
+            &config,
+            crate::model::ToolCallingMode::Native,
+        ));
     }
 }
 
@@ -805,7 +961,7 @@ impl ModelManager {
             .map(|(name, config)| HoshikageModelInfo {
                 id: name.clone(),
                 responses: true,
-                streaming: false,
+                streaming: true,
                 tools: config.tool_calling.mode != crate::model::ToolCallingMode::Disabled,
                 main_model_configured: !config.model.is_empty(),
                 vision: config.mmproj.is_some(),
@@ -829,7 +985,7 @@ impl ModelManager {
         Ok(HoshikageModelInfo {
             id: name.to_string(),
             responses: true,
-            streaming: false,
+            streaming: true,
             tools: config.tool_calling.mode != crate::model::ToolCallingMode::Disabled,
             main_model_configured: !config.model.is_empty(),
             vision: config.mmproj.is_some(),
@@ -1366,6 +1522,265 @@ impl ModelManager {
                 output_tokens,
             },
         })
+    }
+
+    pub async fn stream_model_request(
+        &self,
+        model: &crate::conversation::ModelId,
+        mut request: ModelRequest,
+    ) -> Result<
+        std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = crate::Result<ModelStreamAction>> + Send + 'static>,
+        >,
+    > {
+        use futures_util::StreamExt;
+
+        let model_config = self.get_model(model.as_str()).await?;
+        request.stream = true;
+        validate_tool_request(&request, &model_config)?;
+        apply_tool_result_policy(&mut request, &model_config)?;
+        validate_output_token_limit(
+            request.max_output_tokens,
+            model_config.n_ctx.unwrap_or(self.config.n_ctx),
+        )?;
+        if !self.uses_managed_llama_server() {
+            return Err(crate::error::HoshikageError::ConfigError(
+                "Responses streaming requires the managed llama-server runtime".to_string(),
+            ));
+        }
+
+        let defaults = LlamaServerChatDefaults {
+            temperature: self.default_temperature(),
+            top_p: self.default_top_p(),
+            repeat_penalty: self.default_repeat_penalty(),
+        };
+        let uses_tools = !request.tools.tools().is_empty();
+        let mode = if uses_tools {
+            model_config.tool_calling.mode
+        } else {
+            crate::model::ToolCallingMode::Disabled
+        };
+        if uses_tools {
+            tracing::info!(
+                model = model.as_str(),
+                stream = true,
+                tools_count = request.tools.tools().len(),
+                mode = ?mode,
+                parser = ?model_config.tool_calling.effective_parser(),
+                strict = model_config.tool_calling.strict,
+                fallback = ?model_config.tool_calling.fallback,
+                "Prepared Tool Calling request"
+            );
+        }
+        let body = match mode {
+            crate::model::ToolCallingMode::Json => {
+                build_generic_json_request(model, &request, &model_config, &defaults)?
+            }
+            crate::model::ToolCallingMode::Native | crate::model::ToolCallingMode::Disabled => {
+                build_chat_request(model, &request, &model_config, &defaults)?
+            }
+        };
+        let json_retry_body = if uses_tools
+            && mode == crate::model::ToolCallingMode::Native
+            && semantic_retry_mode(&model_config, mode) == Some(crate::model::ToolCallingMode::Json)
+        {
+            let mut retry_request = request.clone();
+            retry_request.stream = false;
+            Some(build_generic_json_request(
+                model,
+                &retry_request,
+                &model_config,
+                &defaults,
+            )?)
+        } else {
+            None
+        };
+        let lease = self.acquire_managed_llama_server(model.as_str()).await?;
+        self.managed_context_plan(
+            &lease,
+            &body,
+            request.max_output_tokens,
+            model_config.n_ctx.unwrap_or(self.config.n_ctx),
+        )
+        .await?;
+        let first_timeout = std::time::Duration::from_secs(self.config.first_token_timeout_secs);
+        let idle_timeout = std::time::Duration::from_secs(self.config.stream_idle_timeout_secs);
+        let generation_timeout =
+            std::time::Duration::from_secs(self.config.generation_timeout_secs);
+        let upstream = tokio::time::timeout(first_timeout, self.send_managed_chat(&lease, &body))
+            .await
+            .map_err(|_| crate::error::HoshikageError::UpstreamTimeout)??;
+        if !upstream.status().is_success() {
+            return Err(crate::error::HoshikageError::InferenceError(format!(
+                "llama-server returned HTTP {}",
+                upstream.status()
+            )));
+        }
+        let tool_config = model_config.tool_calling.clone();
+        let validation_request = request.clone();
+        let retry_client = self.llama_server_client.clone();
+        let retry_endpoint = lease.endpoint().clone();
+        let retry_model_config = model_config.clone();
+        let retry_limits = BufferedRetryLimits {
+            context_window: model_config.n_ctx.unwrap_or(self.config.n_ctx),
+            first_timeout,
+            generation_timeout,
+        };
+        let stream = async_stream::try_stream! {
+            let mut lease = Some(lease);
+            let mut upstream = upstream.bytes_stream();
+            let mut sse = LlamaServerSseDecoder::default();
+            let started_at = tokio::time::Instant::now();
+            let mut first_chunk = true;
+
+            match mode {
+                crate::model::ToolCallingMode::Native
+                | crate::model::ToolCallingMode::Disabled => {
+                    let mut strategy = NativeStreamStrategy::new(
+                        request.tools.clone(),
+                        request.tool_choice.clone(),
+                        tool_config.strict,
+                        tool_config.max_argument_bytes,
+                    );
+                    let mut emitted_actions = false;
+                    let mut retry_error = None;
+                    'native_stream: loop {
+                        let elapsed = started_at.elapsed();
+                        if elapsed >= generation_timeout {
+                            Err(crate::error::HoshikageError::UpstreamTimeout)?;
+                        }
+                        let per_chunk = if first_chunk { first_timeout } else { idle_timeout };
+                        let remaining = generation_timeout.saturating_sub(elapsed);
+                        let timeout = per_chunk.min(remaining);
+                        let next = tokio::time::timeout(timeout, upstream.next())
+                            .await
+                            .map_err(|_| crate::error::HoshikageError::UpstreamTimeout)?;
+                        let Some(chunk) = next else { break };
+                        let chunk = chunk
+                            .map_err(|_| crate::error::HoshikageError::UpstreamDisconnected)?;
+                        first_chunk = false;
+                        let deltas = match sse.push(&chunk) {
+                            Ok(deltas) => deltas,
+                            Err(error)
+                                if should_retry_stream_semantic_error(
+                                    &error,
+                                    emitted_actions,
+                                    &retry_model_config,
+                                    mode,
+                                ) =>
+                            {
+                                retry_error = Some(error);
+                                break 'native_stream;
+                            }
+                            Err(error) => Err(error)?,
+                        };
+                        for delta in deltas {
+                            let actions = match strategy.push(delta) {
+                                Ok(actions) => actions,
+                                Err(error)
+                                    if should_retry_stream_semantic_error(
+                                        &error,
+                                        emitted_actions,
+                                        &retry_model_config,
+                                        mode,
+                                    ) =>
+                                {
+                                    retry_error = Some(error);
+                                    break 'native_stream;
+                                }
+                                Err(error) => Err(error)?,
+                            };
+                            for action in actions {
+                                emitted_actions = true;
+                                yield action;
+                            }
+                        }
+                    }
+                    if let Some(error) = retry_error {
+                        drop(upstream);
+                        tracing::warn!(
+                            primary_mode = ?mode,
+                            retry_mode = ?crate::model::ToolCallingMode::Json,
+                            error_class = %error,
+                            "Retrying stream Tool generation before output began"
+                        );
+                        let retry_body = json_retry_body.as_ref().ok_or(error)?;
+                        let completion = execute_buffered_json_stream_retry(
+                            &retry_client,
+                            &retry_endpoint,
+                            retry_body,
+                            &validation_request,
+                            &retry_model_config,
+                            retry_limits,
+                        )
+                        .await?;
+                        for action in buffered_completion_actions(completion) {
+                            yield action;
+                        }
+                    } else {
+                        sse.finish()?;
+                        yield strategy.finish()?;
+                    }
+                }
+                crate::model::ToolCallingMode::Json => {
+                    let mut content = String::new();
+                    let mut usage = None;
+                    let mut finish_reason = None;
+                    loop {
+                        let elapsed = started_at.elapsed();
+                        if elapsed >= generation_timeout {
+                            Err(crate::error::HoshikageError::UpstreamTimeout)?;
+                        }
+                        let per_chunk = if first_chunk { first_timeout } else { idle_timeout };
+                        let remaining = generation_timeout.saturating_sub(elapsed);
+                        let timeout = per_chunk.min(remaining);
+                        let next = tokio::time::timeout(timeout, upstream.next())
+                            .await
+                            .map_err(|_| crate::error::HoshikageError::UpstreamTimeout)?;
+                        let Some(chunk) = next else { break };
+                        let chunk = chunk
+                            .map_err(|_| crate::error::HoshikageError::UpstreamDisconnected)?;
+                        first_chunk = false;
+                        for delta in sse.push(&chunk)? {
+                            match delta {
+                                ModelDelta::Text(fragment) => content.push_str(&fragment),
+                                ModelDelta::Usage(measured) => usage = Some(measured),
+                                ModelDelta::Finished(reason) => finish_reason = Some(reason),
+                                ModelDelta::ToolCallStarted { .. }
+                                | ModelDelta::ToolName(_)
+                                | ModelDelta::ToolArguments(_)
+                                | ModelDelta::ToolCallFinished => {
+                                    Err(crate::error::HoshikageError::ResponseTranslationFailed)?;
+                                }
+                            }
+                        }
+                    }
+                    let measured = sse.finish()?;
+                    let usage = usage.unwrap_or(measured);
+                    if finish_reason != Some(ModelFinishReason::Stop) {
+                        Err(crate::error::HoshikageError::ResponseTranslationFailed)?;
+                    }
+                    let completion = parse_generic_json_completion(
+                        ModelCompletion::Text { content, usage },
+                        tool_config.repair_invalid_json,
+                    )?;
+                    let completion = validate_native_completion(
+                        completion,
+                        &validation_request,
+                        &model_config,
+                    )?;
+                    for action in buffered_completion_actions(completion) {
+                        yield action;
+                    }
+                }
+            }
+            if let Some(lease) = lease.take() {
+                lease
+                    .finish()
+                    .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))?;
+            }
+        };
+        Ok(Box::pin(stream))
     }
 
     async fn execute_managed_completion(

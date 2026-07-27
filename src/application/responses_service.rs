@@ -1,11 +1,14 @@
+use super::response_stream::{ResponseEvent, ResponseMachine, ResponseMachineError, StreamFailure};
 use crate::config::UnknownFieldPolicy;
 use crate::conversation::{
     CallId, Conversation, ModelId, OutputItemId, ResponseId, ToolArguments, ToolName,
 };
 use crate::inference::{
-    InferenceGateway, InferenceGatewayError, ModelCompletion, ModelRequest, ModelToolSet,
-    SamplingOptions, TokenUsage, ToolChoice,
+    InferenceGateway, InferenceGatewayError, ModelCompletion, ModelRequest, ModelStreamAction,
+    ModelToolSet, SamplingOptions, TokenUsage, ToolChoice,
 };
+use futures_util::{Stream, StreamExt};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -46,6 +49,7 @@ pub struct NormalizedResponsesRequest {
     pub tool_choice: ToolChoice,
     pub sampling: SamplingOptions,
     pub max_output_tokens: u32,
+    pub stream: bool,
     pub warnings: Vec<String>,
 }
 
@@ -79,6 +83,9 @@ pub enum ResponsesServiceError {
     #[error("failed to construct response identity")]
     Identity,
 }
+
+pub type ResponseEventStream =
+    Pin<Box<dyn Stream<Item = Result<ResponseEvent, ResponsesServiceError>> + Send>>;
 
 pub struct ResponsesService {
     gateway: Arc<dyn InferenceGateway>,
@@ -163,6 +170,152 @@ impl ResponsesService {
             usage,
         })
     }
+
+    pub async fn execute_stream(
+        &self,
+        request: NormalizedResponsesRequest,
+    ) -> Result<ResponseEventStream, ResponsesServiceError> {
+        for field in &request.warnings {
+            tracing::warn!(field, "Ignored unsupported Responses request field");
+        }
+        let model_request = ModelRequest {
+            conversation: request.conversation,
+            tools: request.tools,
+            tool_choice: request.tool_choice,
+            sampling: request.sampling,
+            max_output_tokens: request.max_output_tokens,
+            stream: true,
+        };
+        let upstream = tokio::time::timeout(
+            self.request_timeout,
+            self.gateway.stream(&request.model, model_request),
+        )
+        .await
+        .map_err(|_| InferenceGatewayError::UpstreamTimeout)??;
+        let response_id = ResponseId::new(format!("resp_{}", uuid::Uuid::new_v4().simple()))
+            .map_err(|_| ResponsesServiceError::Identity)?;
+
+        let stream = async_stream::stream! {
+            let mut upstream = upstream;
+            let mut machine = ResponseMachine::new(response_id);
+            match machine.start() {
+                Ok(events) => {
+                    for event in events {
+                        yield Ok(event);
+                    }
+                }
+                Err(_) => {
+                    yield Err(ResponsesServiceError::Identity);
+                    return;
+                }
+            }
+            while let Some(result) = upstream.next().await {
+                let action = match result {
+                    Ok(action) => action,
+                    Err(error) => {
+                        let failure = stream_failure(&error);
+                        if let Ok(events) = machine.fail(failure) {
+                            for event in events {
+                                yield Ok(event);
+                            }
+                        }
+                        return;
+                    }
+                };
+                let events = apply_stream_action(&mut machine, action);
+                match events {
+                    Ok(events) => {
+                        for event in events {
+                            yield Ok(event);
+                        }
+                    }
+                    Err(_) => {
+                        if let Ok(events) = machine.fail(StreamFailure {
+                            code: "response_translation_failed",
+                            message: "Response translation failed",
+                        }) {
+                            for event in events {
+                                yield Ok(event);
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
+            if !machine.is_terminal() {
+                if let Ok(events) = machine.fail(StreamFailure {
+                    code: "upstream_disconnected",
+                    message: "Upstream disconnected",
+                }) {
+                    for event in events {
+                        yield Ok(event);
+                    }
+                }
+            }
+        };
+        Ok(Box::pin(stream))
+    }
+}
+
+fn apply_stream_action(
+    machine: &mut ResponseMachine,
+    action: ModelStreamAction,
+) -> Result<Vec<ResponseEvent>, ResponseMachineError> {
+    match action {
+        ModelStreamAction::BeginText => machine.begin_text(
+            OutputItemId::new(format!("msg_{}", uuid::Uuid::new_v4().simple()))
+                .map_err(|_| ResponseMachineError::InvalidTransition)?,
+        ),
+        ModelStreamAction::AppendText(delta) => machine.append_text(delta).map(|event| vec![event]),
+        ModelStreamAction::FinishText => machine.finish_text(),
+        ModelStreamAction::BeginFunctionCall { name } => machine
+            .begin_function_call(
+                OutputItemId::new(format!("fc_{}", uuid::Uuid::new_v4().simple()))
+                    .map_err(|_| ResponseMachineError::InvalidTransition)?,
+                CallId::new(format!("call_{}", uuid::Uuid::new_v4().simple()))
+                    .map_err(|_| ResponseMachineError::InvalidTransition)?,
+                name,
+            )
+            .map(|event| vec![event]),
+        ModelStreamAction::AppendArguments(delta) => machine
+            .append_function_arguments(delta)
+            .map(|event| vec![event]),
+        ModelStreamAction::FinishFunctionCall => machine.finish_function_call(),
+        ModelStreamAction::Complete { usage } => machine.complete(usage).map(|event| vec![event]),
+    }
+}
+
+fn stream_failure(error: &InferenceGatewayError) -> StreamFailure {
+    match error {
+        InferenceGatewayError::UpstreamTimeout => StreamFailure {
+            code: "upstream_timeout",
+            message: "Upstream timed out",
+        },
+        InferenceGatewayError::UpstreamDisconnected => StreamFailure {
+            code: "upstream_disconnected",
+            message: "Upstream disconnected",
+        },
+        InferenceGatewayError::InvalidToolArguments => StreamFailure {
+            code: "invalid_tool_arguments",
+            message: "Tool arguments are invalid",
+        },
+        InferenceGatewayError::ToolChoiceViolation => StreamFailure {
+            code: "tool_choice_violation",
+            message: "Model violated tool choice",
+        },
+        InferenceGatewayError::ContextLengthExceeded => StreamFailure {
+            code: "context_length_exceeded",
+            message: "Context length exceeded",
+        },
+        InferenceGatewayError::TranslationFailed => StreamFailure {
+            code: "response_translation_failed",
+            message: "Response translation failed",
+        },
+        _ => StreamFailure {
+            code: "generation_failed",
+            message: "Generation failed",
+        },
+    }
 }
 
 #[cfg(test)]
@@ -221,6 +374,7 @@ mod tests {
             tool_choice: ToolChoice::None,
             sampling: SamplingOptions::default(),
             max_output_tokens: 64,
+            stream: false,
             warnings: Vec::new(),
         }
     }

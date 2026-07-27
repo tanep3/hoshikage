@@ -86,7 +86,7 @@ pub fn build_chat_request(
     let mut body = serde_json::json!({
         "model": model.as_str(),
         "messages": messages,
-        "stream": false,
+        "stream": request.stream,
         "temperature": request.sampling.temperature.unwrap_or(defaults.temperature),
         "top_p": request.sampling.top_p.unwrap_or(defaults.top_p),
         "max_tokens": request.max_output_tokens,
@@ -95,6 +95,9 @@ pub fn build_chat_request(
     });
     if model_config.thinking.mode == ThinkingMode::Off {
         body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
+    }
+    if request.stream {
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
     }
     if !request.tools.tools().is_empty() {
         body["tools"] = Value::Array(

@@ -1,20 +1,20 @@
 # Hoshikage Codex Agent Compatibility Matrix
 
 **更新日:** 2026-07-27
-**状態:** Phase 3 Fix
+**状態:** Phase 4 Fix
 
 ## 1. Codex CLI
 
 | Codex CLI | Text SSE | Function Call | Function Call Output | 複数step前提 | 状態 |
 |---|---:|---:|---:|---:|---|
-| `0.144.5` | Pass | Pass | Pass | Wire契約確認済み | 検証済み |
+| `0.144.5` | Pass | Pass | Pass | 実Agent Loop完走 | 検証済み |
 | `0.144.x`の他patch | - | - | - | - | 未検証 |
 | 他minor系列 | - | - | - | - | 未検証 |
 
-`0.144.5`は実際の`codex exec`をカスタムResponses Providerへ接続して検証した。
-Phase 0ではCall/Result再入力のwire shapeを確認した。Phase 3では同じ契約をHoshikage製品へ
-実装し、標準Bundleによる非ストリーム単一Tool Loopを直接APIでEnd-to-End確認した。
-Codex CLIは`stream=true`を要求するため、Codex CLIからの最終E2EはPhase 4で行う。
+`0.144.5`は実際の`codex exec`をHoshikageカスタムResponses Providerへ接続して検証した。
+Phase 4ではText SSEに加え、CodexがシェルToolを選択・実行し、Function Call Outputを
+Hoshikageへ再投入して最終回答を得る実Agent Loopを標準BundleでEnd-to-End確認した。
+推論upstreamはローカル`llama-server`のみである。
 
 ## 2. llama-server
 
@@ -45,6 +45,8 @@ Native streamではargumentsが任意位置で分割され、Tool完了後に`ch
 | Native arguments JSON | Pass |
 | Function Call Output後の最終回答 | Pass |
 | Native Tool stream | Pass |
+| Codex CLI Native Agent Loop | Pass |
+| Codex CLI Generic JSON Agent Loop | Pass |
 | Generic JSON auto Tool選択 | Pass |
 | Generic JSON複合arguments | Pass |
 | Unicode・array・boolean・integer・nested object保持 | Pass |
@@ -75,4 +77,7 @@ CUDAドライバ不整合によりGPU VRAMとlatencyを未検証である。
 - parallel Tool Callは初期版では最大1 Callへ制約する。
 - GPU性能、VRAM、32K contextのGPU実機値は未検証である。
 - Vision、MTP、上位SkillのEnd-to-Endは後続Phaseで検証する。
-- 非ストリーム単一Tool LoopはPhase 3で製品実装済み。SSEはPhase 4で実装する。
+- Generic JSON実機試験では、モデルが同一Tool Callを4回選択してから最終回答した。各Callは
+  Codexが順次実行しており、HoshikageがToolを実行したものではない。
+- NativeからJSONへのストリーム再試行は、外部へ出力を開始する前の意味エラーに限る。
+  部分出力後、通信障害、timeoutでは二重出力防止のため再試行しない。

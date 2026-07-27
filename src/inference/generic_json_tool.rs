@@ -43,7 +43,7 @@ pub fn build_generic_json_request(
         tool_choice: ToolChoice::None,
         sampling: request.sampling.clone(),
         max_output_tokens: request.max_output_tokens,
-        stream: false,
+        stream: request.stream,
     };
     let mut body = build_chat_request(model, &rewritten, config, defaults)?;
     body["response_format"] = serde_json::json!({
