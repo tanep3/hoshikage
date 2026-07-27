@@ -247,9 +247,14 @@ wire_api = "responses"
 env_key = "HOSHIKAGE_API_KEY"
 request_max_retries = 1
 stream_max_retries = 1
+
+[sandbox_workspace_write]
+network_access = true
 ```
 
 Never put the Token plaintext in this TOML. `env_key` tells Codex which process environment variable contains the Token.
+
+`network_access = true` is required for Skills such as Search, Fetch, and Recall to reach LAN and Internet services from inside the Codex sandbox. Writable paths remain restricted by `workspace-write`, and Hoshikage does not alter Codex approval or sandbox behavior.
 
 ### 5.3 Saving configuration by operating system
 

@@ -71,6 +71,7 @@ struct CodexConfigDocument<'a> {
     tool_output_token_limit: u32,
     model_reasoning_summary: &'static str,
     model_providers: CodexProviders<'a>,
+    sandbox_workspace_write: CodexSandboxWorkspaceWrite,
 }
 
 #[derive(Serialize)]
@@ -89,6 +90,11 @@ struct CodexProvider<'a> {
     env_key: Option<&'static str>,
     request_max_retries: u8,
     stream_max_retries: u8,
+}
+
+#[derive(Serialize)]
+struct CodexSandboxWorkspaceWrite {
+    network_access: bool,
 }
 
 pub fn build_model_catalog(
@@ -174,6 +180,9 @@ pub fn render_codex_config(
                 request_max_retries: 1,
                 stream_max_retries: 1,
             },
+        },
+        sandbox_workspace_write: CodexSandboxWorkspaceWrite {
+            network_access: true,
         },
     };
     toml::to_string_pretty(&document)
@@ -264,6 +273,8 @@ mod tests {
         assert!(output.contains("tool_output_token_limit = 4096"));
         assert!(output.contains("wire_api = \"responses\""));
         assert!(output.contains("requires_openai_auth = false"));
+        assert!(output.contains("[sandbox_workspace_write]"));
+        assert!(output.contains("network_access = true"));
         assert!(!output.contains("env_key"));
     }
 

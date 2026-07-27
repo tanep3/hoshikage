@@ -247,9 +247,14 @@ wire_api = "responses"
 env_key = "HOSHIKAGE_API_KEY"
 request_max_retries = 1
 stream_max_retries = 1
+
+[sandbox_workspace_write]
+network_access = true
 ```
 
 Token本文はこのTOMLへ書きません。`env_key`は「Codex processのどの環境変数からTokenを読むか」という指定です。
+
+`network_access = true`は、Codex sandbox内で実行するSearch、Fetch、RecallなどのSkillがLAN・Internetへ接続するために必要です。書込み可能範囲は引き続き`workspace-write`に制限され、Hoshikageは承認やsandboxを変更しません。
 
 ### 5.3 OSごとに保存する
 

@@ -1832,6 +1832,7 @@ hoshikage codex-model-catalog --json
 - 両方ともmodel、context、auto compact、Tool出力上限をBundleから生成
 - Provider IDは`hoshikage`
 - LAN認証Profileは`env_key = "HOSHIKAGE_API_KEY"`を出力
+- `workspace-write`を維持し、network-backed Skill用に`[sandbox_workspace_write] network_access = true`を出力
 - Provider/モデルの採用判断は利用者または上位アプリケーション
 
 ### 19.5 ユーザーマニュアル
