@@ -40,6 +40,13 @@ fn responses_service(
         Arc::new(crate::inference::ModelManagerGateway::new(manager.clone())),
         manager.responses_unknown_field_policy(),
         std::time::Duration::from_secs(manager.responses_timeout_secs()),
+        crate::application::ResponsesRequestLimits {
+            max_tool_schema_bytes: manager.max_tool_schema_bytes(),
+            max_single_tool_schema_bytes: manager.max_single_tool_schema_bytes(),
+            max_tools: manager.max_tools(),
+            max_tool_argument_bytes: manager.max_tool_argument_bytes(),
+            max_tool_result_bytes: manager.max_tool_result_bytes(),
+        },
     ))
 }
 

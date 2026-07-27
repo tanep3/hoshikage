@@ -21,6 +21,7 @@ pub struct ModelTool {
     pub name: ToolName,
     pub description: Option<String>,
     pub parameters: Value,
+    pub strict: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -2,11 +2,14 @@ use crate::config::{Config, RuntimeBackendKind};
 use crate::error::Result;
 use crate::inference::llama_wrapper::InferenceParams;
 use crate::inference::{
-    build_text_request, parse_text_response, LlamaFfiBackend, LlamaLoadRequest, LlamaServerClient,
-    LlamaServerCommandSpec, LlamaServerLaunchConfig, LlamaServerProcess, LlamaServerTextDefaults,
+    apply_tool_result_policy, build_chat_request, build_generic_json_request, parse_chat_response,
+    parse_generic_json_completion, validate_native_completion, validate_tool_request,
+    ContextAccuracy, ContextPlan, LlamaFfiBackend, LlamaLoadRequest, LlamaServerChatDefaults,
+    LlamaServerClient, LlamaServerCommandSpec, LlamaServerLaunchConfig, LlamaServerProcess,
     LoadedRuntimeInfo, ModelCompletion, ModelRequest, RuntimeBackend, ThinkingController,
     ThinkingStreamFilter, TokenUsage,
 };
+use crate::model::tool_calling::ToolCallingConfig;
 use crate::runtime::{RuntimeCoordinator, RuntimeEndpoint, RuntimeLease};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -32,6 +35,11 @@ pub struct ModelConfig {
     pub speculation: SpeculationConfig,
     #[serde(default)]
     pub thinking: ThinkingConfig,
+    #[serde(
+        default,
+        skip_serializing_if = "ToolCallingConfig::is_disabled_default"
+    )]
+    pub tool_calling: crate::model::ToolCallingConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n_ctx: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -196,6 +204,31 @@ fn validate_output_token_limit(max_output_tokens: u32, n_ctx: u32) -> Result<()>
         return Err(crate::error::HoshikageError::ContextLengthExceeded);
     }
     Ok(())
+}
+
+fn is_semantic_tool_error(error: &crate::error::HoshikageError) -> bool {
+    matches!(
+        error,
+        crate::error::HoshikageError::InvalidToolArguments
+            | crate::error::HoshikageError::ToolChoiceViolation
+            | crate::error::HoshikageError::MultipleToolCalls
+            | crate::error::HoshikageError::ResponseTranslationFailed
+    )
+}
+
+fn semantic_retry_mode(
+    config: &ModelConfig,
+    primary: crate::model::ToolCallingMode,
+) -> Option<crate::model::ToolCallingMode> {
+    match primary {
+        crate::model::ToolCallingMode::Native
+            if config.tool_calling.fallback == crate::model::ToolFallback::Json =>
+        {
+            Some(crate::model::ToolCallingMode::Json)
+        }
+        crate::model::ToolCallingMode::Json => Some(crate::model::ToolCallingMode::Json),
+        crate::model::ToolCallingMode::Native | crate::model::ToolCallingMode::Disabled => None,
+    }
 }
 
 #[cfg(target_family = "unix")]
@@ -427,6 +460,7 @@ impl ModelConfig {
             drafter: None,
             speculation: SpeculationConfig::default(),
             thinking: ThinkingConfig::default(),
+            tool_calling: ToolCallingConfig::default(),
             n_ctx: None,
             n_gpu_layers: None,
         }
@@ -448,6 +482,28 @@ mod config_tests {
             validate_output_token_limit(4097, 4096),
             Err(crate::error::HoshikageError::ContextLengthExceeded)
         ));
+    }
+
+    #[test]
+    fn semantic_retry_budget_selects_one_json_attempt() {
+        let mut config =
+            ModelConfig::new_legacy("/models".to_string(), "model.gguf".to_string(), Vec::new());
+        config.tool_calling.mode = crate::model::ToolCallingMode::Native;
+        config.tool_calling.fallback = crate::model::ToolFallback::Json;
+
+        assert_eq!(
+            semantic_retry_mode(&config, crate::model::ToolCallingMode::Native),
+            Some(crate::model::ToolCallingMode::Json)
+        );
+        assert_eq!(
+            semantic_retry_mode(&config, crate::model::ToolCallingMode::Json),
+            Some(crate::model::ToolCallingMode::Json)
+        );
+        config.tool_calling.fallback = crate::model::ToolFallback::None;
+        assert_eq!(
+            semantic_retry_mode(&config, crate::model::ToolCallingMode::Native),
+            None
+        );
     }
 
     #[test]
@@ -567,6 +623,9 @@ pub struct LoadedRuntimeInfoSnapshot {
 #[derive(Debug, Clone, Serialize)]
 pub struct HoshikageModelInfo {
     pub id: String,
+    pub responses: bool,
+    pub streaming: bool,
+    pub tools: bool,
     pub main_model_configured: bool,
     pub vision: bool,
     pub mmproj_configured: bool,
@@ -574,6 +633,9 @@ pub struct HoshikageModelInfo {
     pub draft_model_configured: bool,
     pub thinking: ThinkingMode,
     pub fallback: FallbackMode,
+    pub reasoning: bool,
+    pub tool_calling_mode: crate::model::ToolCallingMode,
+    pub tool_parser: crate::model::ToolParserId,
 }
 
 impl From<LoadedRuntimeInfo> for LoadedRuntimeInfoSnapshot {
@@ -742,6 +804,9 @@ impl ModelManager {
             .iter()
             .map(|(name, config)| HoshikageModelInfo {
                 id: name.clone(),
+                responses: true,
+                streaming: false,
+                tools: config.tool_calling.mode != crate::model::ToolCallingMode::Disabled,
                 main_model_configured: !config.model.is_empty(),
                 vision: config.mmproj.is_some(),
                 mmproj_configured: config.mmproj.is_some(),
@@ -750,6 +815,9 @@ impl ModelManager {
                     && config.drafter.is_some(),
                 thinking: config.thinking.mode.clone(),
                 fallback: config.speculation.fallback.clone(),
+                reasoning: false,
+                tool_calling_mode: config.tool_calling.mode,
+                tool_parser: config.tool_calling.effective_parser(),
             })
             .collect::<Vec<_>>();
         data.sort_by(|a, b| a.id.cmp(&b.id));
@@ -760,6 +828,9 @@ impl ModelManager {
         let config = self.get_model(name).await?;
         Ok(HoshikageModelInfo {
             id: name.to_string(),
+            responses: true,
+            streaming: false,
+            tools: config.tool_calling.mode != crate::model::ToolCallingMode::Disabled,
             main_model_configured: !config.model.is_empty(),
             vision: config.mmproj.is_some(),
             mmproj_configured: config.mmproj.is_some(),
@@ -768,6 +839,9 @@ impl ModelManager {
                 && config.drafter.is_some(),
             thinking: config.thinking.mode,
             fallback: config.speculation.fallback,
+            reasoning: false,
+            tool_calling_mode: config.tool_calling.mode,
+            tool_parser: config.tool_calling.effective_parser(),
         })
     }
 
@@ -842,6 +916,26 @@ impl ModelManager {
 
     pub fn max_request_bytes(&self) -> usize {
         self.config.max_request_bytes
+    }
+
+    pub fn max_tool_schema_bytes(&self) -> usize {
+        self.config.max_tool_schema_bytes
+    }
+
+    pub fn max_single_tool_schema_bytes(&self) -> usize {
+        self.config.max_single_tool_schema_bytes
+    }
+
+    pub fn max_tools(&self) -> usize {
+        self.config.max_tools
+    }
+
+    pub fn max_tool_argument_bytes(&self) -> usize {
+        self.config.max_tool_argument_bytes
+    }
+
+    pub fn max_tool_result_bytes(&self) -> usize {
+        self.config.max_tool_result_bytes
     }
 
     pub fn responses_timeout_secs(&self) -> u64 {
@@ -1145,67 +1239,97 @@ impl ModelManager {
     pub async fn complete_model_request(
         &self,
         model: &crate::conversation::ModelId,
-        request: ModelRequest,
+        mut request: ModelRequest,
     ) -> Result<ModelCompletion> {
         let model_config = self.get_model(model.as_str()).await?;
+        validate_tool_request(&request, &model_config)?;
+        apply_tool_result_policy(&mut request, &model_config)?;
+        if !request.tools.tools().is_empty() {
+            tracing::info!(
+                model = model.as_str(),
+                tools_count = request.tools.tools().len(),
+                mode = ?model_config.tool_calling.mode,
+                parser = ?model_config.tool_calling.effective_parser(),
+                strict = model_config.tool_calling.strict,
+                fallback = ?model_config.tool_calling.fallback,
+                "Prepared Tool Calling request"
+            );
+        }
         validate_output_token_limit(
             request.max_output_tokens,
             model_config.n_ctx.unwrap_or(self.config.n_ctx),
         )?;
         if self.uses_managed_llama_server() {
-            let body = build_text_request(
-                model,
-                &request,
-                &model_config,
-                &LlamaServerTextDefaults {
-                    temperature: self.default_temperature(),
-                    top_p: self.default_top_p(),
-                    repeat_penalty: self.default_repeat_penalty(),
-                },
-            )?;
-            let lease = self.acquire_managed_llama_server(model.as_str()).await?;
-            let upstream = match self.send_managed_chat(&lease, &body).await {
-                Ok(response) => response,
-                Err(error) => {
-                    self.mark_managed_lease_unhealthy(
-                        model.as_str(),
-                        &lease,
-                        format!("Responses upstream request failed: {error}"),
-                    );
-                    return Err(error.into());
+            let defaults = LlamaServerChatDefaults {
+                temperature: self.default_temperature(),
+                top_p: self.default_top_p(),
+                repeat_penalty: self.default_repeat_penalty(),
+            };
+            let uses_tools = !request.tools.tools().is_empty();
+            let primary_mode = if uses_tools {
+                model_config.tool_calling.mode
+            } else {
+                crate::model::ToolCallingMode::Disabled
+            };
+            let body = match primary_mode {
+                crate::model::ToolCallingMode::Json => {
+                    build_generic_json_request(model, &request, &model_config, &defaults)?
+                }
+                crate::model::ToolCallingMode::Native | crate::model::ToolCallingMode::Disabled => {
+                    build_chat_request(model, &request, &model_config, &defaults)?
                 }
             };
-            if !upstream.status().is_success() {
-                let status = upstream.status();
-                if let Err(error) = lease.finish() {
+            let lease = self.acquire_managed_llama_server(model.as_str()).await?;
+            let primary = self
+                .execute_managed_completion(
+                    model,
+                    &lease,
+                    &body,
+                    primary_mode,
+                    &request,
+                    &model_config,
+                )
+                .await;
+            let completion = match primary {
+                Ok(completion) => completion,
+                Err(error)
+                    if uses_tools
+                        && is_semantic_tool_error(&error)
+                        && semantic_retry_mode(&model_config, primary_mode).is_some() =>
+                {
+                    let Some(retry_mode) = semantic_retry_mode(&model_config, primary_mode) else {
+                        return Err(error);
+                    };
                     tracing::warn!(
                         model = model.as_str(),
-                        error = %error,
-                        "Failed to finish runtime lease after upstream HTTP error"
+                        primary_mode = ?primary_mode,
+                        retry_mode = ?retry_mode,
+                        error_class = %error,
+                        "Retrying Tool generation within semantic budget"
                     );
-                }
-                return Err(crate::error::HoshikageError::InferenceError(format!(
-                    "llama-server returned HTTP {status}"
-                )));
-            }
-            let bytes = match upstream.bytes().await {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    self.mark_managed_lease_unhealthy(
-                        model.as_str(),
+                    let retry_body =
+                        build_generic_json_request(model, &request, &model_config, &defaults)?;
+                    self.execute_managed_completion(
+                        model,
                         &lease,
-                        format!("Responses upstream body failed: {error}"),
-                    );
-                    return Err(error.into());
+                        &retry_body,
+                        retry_mode,
+                        &request,
+                        &model_config,
+                    )
+                    .await?
                 }
+                Err(error) => return Err(error),
             };
-            let completion = parse_text_response(&bytes)?;
             lease
                 .finish()
                 .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))?;
             return Ok(completion);
         }
 
+        if !request.tools.tools().is_empty() {
+            return Err(crate::error::HoshikageError::ToolCallingNotSupported);
+        }
         let messages = request
             .conversation
             .items()
@@ -1242,6 +1366,140 @@ impl ModelManager {
                 output_tokens,
             },
         })
+    }
+
+    async fn execute_managed_completion(
+        &self,
+        model: &crate::conversation::ModelId,
+        lease: &RuntimeLease,
+        body: &serde_json::Value,
+        mode: crate::model::ToolCallingMode,
+        request: &ModelRequest,
+        model_config: &ModelConfig,
+    ) -> Result<ModelCompletion> {
+        let plan = self
+            .managed_context_plan(
+                lease,
+                body,
+                request.max_output_tokens,
+                model_config.n_ctx.unwrap_or(self.config.n_ctx),
+            )
+            .await?;
+        tracing::debug!(
+            model = model.as_str(),
+            input_tokens = plan.input_tokens,
+            reserved_output_tokens = plan.reserved_output_tokens,
+            context_window = plan.context_window,
+            accuracy = ?plan.accuracy,
+            "Validated Responses context plan"
+        );
+        let upstream = match self.send_managed_chat(lease, body).await {
+            Ok(response) => response,
+            Err(error) => {
+                self.mark_managed_lease_unhealthy(
+                    model.as_str(),
+                    lease,
+                    format!("Responses upstream request failed: {error}"),
+                );
+                return Err(error.into());
+            }
+        };
+        if !upstream.status().is_success() {
+            return Err(crate::error::HoshikageError::InferenceError(format!(
+                "llama-server returned HTTP {}",
+                upstream.status()
+            )));
+        }
+        let bytes = match upstream.bytes().await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.mark_managed_lease_unhealthy(
+                    model.as_str(),
+                    lease,
+                    format!("Responses upstream body failed: {error}"),
+                );
+                return Err(error.into());
+            }
+        };
+        let completion = parse_chat_response(&bytes)?;
+        let completion = match mode {
+            crate::model::ToolCallingMode::Json => parse_generic_json_completion(
+                completion,
+                model_config.tool_calling.repair_invalid_json,
+            )?,
+            crate::model::ToolCallingMode::Native | crate::model::ToolCallingMode::Disabled => {
+                completion
+            }
+        };
+        validate_native_completion(completion, request, model_config)
+    }
+
+    async fn managed_context_plan(
+        &self,
+        lease: &RuntimeLease,
+        body: &serde_json::Value,
+        reserved_output_tokens: u32,
+        context_window: u32,
+    ) -> Result<ContextPlan> {
+        #[derive(Deserialize)]
+        struct InputTokensResponse {
+            input_tokens: u32,
+        }
+
+        let request_bytes = serde_json::to_vec(body)?.len();
+        let response = self
+            .llama_server_client
+            .chat_input_tokens(lease.endpoint(), body)
+            .await;
+        let plan = match response {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<InputTokensResponse>().await {
+                    Ok(decoded) => ContextPlan {
+                        input_tokens: decoded.input_tokens,
+                        reserved_output_tokens,
+                        context_window,
+                        accuracy: ContextAccuracy::Exact,
+                    },
+                    Err(_) => {
+                        tracing::warn!(
+                            "llama-server input token response was invalid; using conservative context plan"
+                        );
+                        ContextPlan::conservative_from_request_bytes(
+                            request_bytes,
+                            reserved_output_tokens,
+                            context_window,
+                        )
+                    }
+                }
+            }
+            Ok(response) => {
+                tracing::warn!(
+                    status = %response.status(),
+                    "llama-server input token endpoint unavailable; using conservative context plan"
+                );
+                ContextPlan::conservative_from_request_bytes(
+                    request_bytes,
+                    reserved_output_tokens,
+                    context_window,
+                )
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_class = if error.is_timeout() {
+                        "timeout"
+                    } else {
+                        "transport"
+                    },
+                    "llama-server input token endpoint failed; using conservative context plan"
+                );
+                ContextPlan::conservative_from_request_bytes(
+                    request_bytes,
+                    reserved_output_tokens,
+                    context_window,
+                )
+            }
+        };
+        plan.validate()
     }
 
     pub async fn build_prompt(

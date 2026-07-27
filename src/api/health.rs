@@ -53,7 +53,7 @@ pub async fn capabilities() -> Json<CapabilitiesResponse> {
     Json(CapabilitiesResponse {
         responses_api: true,
         streaming: false,
-        function_calling: false,
+        function_calling: true,
         parallel_tool_calls: false,
         vision: false,
     })
@@ -64,12 +64,12 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn phase_two_capabilities_do_not_overstate_future_features() {
+    async fn phase_three_capabilities_do_not_overstate_future_features() {
         let response = capabilities().await;
 
         assert!(response.responses_api);
         assert!(!response.streaming);
-        assert!(!response.function_calling);
+        assert!(response.function_calling);
         assert!(!response.parallel_tool_calls);
         assert!(!response.vision);
     }

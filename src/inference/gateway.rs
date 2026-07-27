@@ -18,6 +18,14 @@ pub enum InferenceGatewayError {
     ServerBusy,
     #[error("context length exceeded")]
     ContextLengthExceeded,
+    #[error("model does not support tool calling")]
+    ToolCallingNotSupported,
+    #[error("tool schema is invalid")]
+    InvalidToolSchema,
+    #[error("tool arguments are invalid")]
+    InvalidToolArguments,
+    #[error("model violated tool choice")]
+    ToolChoiceViolation,
     #[error("upstream timed out")]
     UpstreamTimeout,
     #[error("upstream disconnected")]
@@ -65,6 +73,19 @@ impl InferenceGateway for ModelManagerGateway {
                 crate::error::HoshikageError::ServerBusy => InferenceGatewayError::ServerBusy,
                 crate::error::HoshikageError::ContextLengthExceeded => {
                     InferenceGatewayError::ContextLengthExceeded
+                }
+                crate::error::HoshikageError::ToolCallingNotSupported => {
+                    InferenceGatewayError::ToolCallingNotSupported
+                }
+                crate::error::HoshikageError::InvalidToolSchema => {
+                    InferenceGatewayError::InvalidToolSchema
+                }
+                crate::error::HoshikageError::InvalidToolArguments
+                | crate::error::HoshikageError::MultipleToolCalls => {
+                    InferenceGatewayError::InvalidToolArguments
+                }
+                crate::error::HoshikageError::ToolChoiceViolation => {
+                    InferenceGatewayError::ToolChoiceViolation
                 }
                 crate::error::HoshikageError::SerdeError(_) => {
                     InferenceGatewayError::TranslationFailed

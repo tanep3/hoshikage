@@ -28,6 +28,12 @@ impl ModelRegistry {
         }
         let content = std::fs::read_to_string(&path)?;
         let models: HashMap<String, ModelConfig> = serde_json::from_str(&content)?;
+        for (name, config) in &models {
+            config
+                .tool_calling
+                .validate()
+                .map_err(|error| HoshikageError::ConfigError(format!("model {name}: {error}")))?;
+        }
         *self.models.write().await = models;
         Ok(true)
     }
@@ -85,6 +91,10 @@ impl ModelRegistry {
     }
 
     pub async fn insert(&self, name: String, config: ModelConfig) -> Result<()> {
+        config
+            .tool_calling
+            .validate()
+            .map_err(HoshikageError::ConfigError)?;
         let mut models = self.models.write().await;
         let previous = models.insert(name.clone(), config);
         if let Err(error) = self.save_snapshot(&models) {
@@ -144,6 +154,7 @@ mod tests {
             drafter: None,
             speculation: SpeculationConfig::default(),
             thinking: ThinkingConfig::default(),
+            tool_calling: crate::model::ToolCallingConfig::default(),
             n_ctx: Some(16384),
             n_gpu_layers: Some(0),
         }

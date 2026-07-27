@@ -25,6 +25,7 @@ base64 = "0.22"
 # シリアライズ
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+jsonschema = { version = "0.40", default-features = false }
 
 # 環境変数
 dotenvy = "0.15"

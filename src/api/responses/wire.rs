@@ -1,9 +1,12 @@
 use crate::config::UnknownFieldPolicy;
-use crate::conversation::{ContentPart, Conversation, ConversationItem, Message, ModelId, Role};
-use crate::inference::{SamplingOptions, TokenUsage};
+use crate::conversation::{
+    CallId, ContentPart, Conversation, ConversationError, ConversationItem, FunctionCall,
+    FunctionCallOutput, Message, ModelId, Role, ToolArguments, ToolName, ToolOutcome,
+};
+use crate::inference::{ModelTool, ModelToolSet, SamplingOptions, TokenUsage, ToolChoice};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use thiserror::Error;
 
 #[derive(Debug, Serialize)]
@@ -13,17 +16,34 @@ pub struct CompletedResponseWire {
     pub created_at: i64,
     pub status: &'static str,
     pub model: String,
-    pub output: Vec<OutputItemWire>,
+    pub output: Vec<CompletedOutputItemWire>,
     pub usage: UsageWire,
 }
 
 #[derive(Debug, Serialize)]
-pub struct OutputItemWire {
+#[serde(untagged)]
+pub enum CompletedOutputItemWire {
+    Message(OutputMessageWire),
+    FunctionCall(OutputFunctionCallWire),
+}
+
+#[derive(Debug, Serialize)]
+pub struct OutputMessageWire {
     pub id: String,
     pub r#type: &'static str,
     pub role: &'static str,
     pub status: &'static str,
     pub content: Vec<OutputContentWire>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OutputFunctionCallWire {
+    pub id: String,
+    pub r#type: &'static str,
+    pub call_id: String,
+    pub name: String,
+    pub arguments: String,
+    pub status: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,23 +72,38 @@ impl From<crate::application::CompletedResponse> for CompletedResponseWire {
                 output_tokens,
             } => (input_tokens, output_tokens),
         };
+        let output = match response.output {
+            crate::application::CompletedOutput::Message(message) => {
+                CompletedOutputItemWire::Message(OutputMessageWire {
+                    id: message.id.as_str().to_string(),
+                    r#type: "message",
+                    role: "assistant",
+                    status: "completed",
+                    content: vec![OutputContentWire {
+                        r#type: "output_text",
+                        text: message.text,
+                        annotations: Vec::new(),
+                    }],
+                })
+            }
+            crate::application::CompletedOutput::FunctionCall(call) => {
+                CompletedOutputItemWire::FunctionCall(OutputFunctionCallWire {
+                    id: call.id.as_str().to_string(),
+                    r#type: "function_call",
+                    call_id: call.call_id.as_str().to_string(),
+                    name: call.name.as_str().to_string(),
+                    arguments: call.arguments.canonical_json().to_string(),
+                    status: "completed",
+                })
+            }
+        };
         Self {
             id: response.id.as_str().to_string(),
             object: "response",
             created_at: response.created_at,
             status: "completed",
             model: response.model.as_str().to_string(),
-            output: vec![OutputItemWire {
-                id: response.message.id.as_str().to_string(),
-                r#type: "message",
-                role: "assistant",
-                status: "completed",
-                content: vec![OutputContentWire {
-                    r#type: "output_text",
-                    text: response.message.text,
-                    annotations: Vec::new(),
-                }],
-            }],
+            output: vec![output],
             usage: UsageWire {
                 input_tokens,
                 output_tokens,
@@ -89,6 +124,18 @@ pub struct WireRequestError {
 pub fn decode_request(
     value: Value,
     policy: UnknownFieldPolicy,
+) -> Result<crate::application::NormalizedResponsesRequest, WireRequestError> {
+    decode_request_with_limits(
+        value,
+        policy,
+        crate::application::ResponsesRequestLimits::default(),
+    )
+}
+
+pub fn decode_request_with_limits(
+    value: Value,
+    policy: UnknownFieldPolicy,
+    limits: crate::application::ResponsesRequestLimits,
 ) -> Result<crate::application::NormalizedResponsesRequest, WireRequestError> {
     let object = value
         .as_object()
@@ -121,10 +168,7 @@ pub fn decode_request(
             continue;
         }
         if key == "previous_response_id" {
-            return Err(unsupported(
-                "previous_response_id",
-                "previous_response_id is not supported by this stateless provider",
-            ));
+            continue;
         }
         if compatible_only.contains(key.as_str()) || !supported.contains(key.as_str()) {
             if policy == UnknownFieldPolicy::Strict {
@@ -150,24 +194,9 @@ pub fn decode_request(
     {
         return Err(invalid("stream must be a boolean", Some("stream")));
     }
-    if object
-        .get("tools")
-        .is_some_and(|tools| !tools.is_null() && tools.as_array().is_none())
-    {
-        return Err(invalid("tools must be an array", Some("tools")));
-    }
-    if object
-        .get("tools")
-        .and_then(Value::as_array)
-        .is_some_and(|tools| !tools.is_empty())
-    {
-        return Err(WireRequestError {
-            code: "tool_calling_not_supported",
-            param: Some("tools".to_string()),
-            message: "Tool calling is not available in the text-only Responses phase".to_string(),
-        });
-    }
-    validate_tool_choice(object.get("tool_choice"))?;
+    let tools = normalize_tools(object.get("tools"), policy, limits, &mut warnings)?;
+    let tool_choice = normalize_tool_choice(object.get("tool_choice"), &tools)?;
+    warnings.sort();
 
     let model = object
         .get("model")
@@ -189,11 +218,35 @@ pub fn decode_request(
                 .map_err(|_| invalid("instructions are invalid", Some("instructions")))?,
         ));
     }
-    normalize_input(input, &mut items)?;
+    normalize_input(input, &mut items, limits)?;
     let conversation = Conversation::new(items);
-    conversation
-        .validate()
-        .map_err(|_| invalid("input conversation is invalid", Some("input")))?;
+    conversation.validate().map_err(conversation_error)?;
+    if let Some(previous_response_id) = object
+        .get("previous_response_id")
+        .filter(|value| !value.is_null())
+    {
+        let valid_id = previous_response_id
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty());
+        let has_message = conversation
+            .items()
+            .iter()
+            .any(|item| matches!(item, ConversationItem::Message(_)));
+        let has_completed_call = conversation
+            .items()
+            .iter()
+            .any(|item| matches!(item, ConversationItem::FunctionCallOutput(_)));
+        if !valid_id || !has_message || !has_completed_call {
+            return Err(WireRequestError {
+                code: "previous_response_not_supported",
+                param: Some("previous_response_id".to_string()),
+                message: "previous_response_id requires a complete stateless Tool history"
+                    .to_string(),
+            });
+        }
+        warnings.push("previous_response_id".to_string());
+        warnings.sort();
+    }
 
     let sampling = SamplingOptions {
         temperature: optional_f32(object, "temperature")?,
@@ -246,6 +299,8 @@ pub fn decode_request(
     Ok(crate::application::NormalizedResponsesRequest {
         model,
         conversation,
+        tools,
+        tool_choice,
         sampling,
         max_output_tokens,
         warnings,
@@ -255,6 +310,7 @@ pub fn decode_request(
 fn normalize_input(
     input: &Value,
     items: &mut Vec<ConversationItem>,
+    limits: crate::application::ResponsesRequestLimits,
 ) -> Result<(), WireRequestError> {
     if let Some(text) = input.as_str() {
         items.push(ConversationItem::Message(
@@ -273,29 +329,135 @@ fn normalize_input(
         let object = item
             .as_object()
             .ok_or_else(|| invalid("input item must be an object", Some("input")))?;
-        if object.get("type").and_then(Value::as_str) != Some("message") {
+        match object.get("type").and_then(Value::as_str) {
+            Some("message") => {
+                let role = object
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| invalid("message role is required", Some("input")))
+                    .and_then(|role| {
+                        Role::parse(role)
+                            .map_err(|_| invalid("message role is invalid", Some("input")))
+                    })?;
+                let content = object
+                    .get("content")
+                    .ok_or_else(|| invalid("message content is required", Some("input")))?;
+                let content = normalize_message_content(content)?;
+                items.push(ConversationItem::Message(
+                    Message::new(role, content)
+                        .map_err(|_| invalid("message content is invalid", Some("input")))?,
+                ));
+            }
+            Some("function_call") => {
+                items.push(ConversationItem::FunctionCall(normalize_function_call(
+                    object, limits,
+                )?));
+            }
+            Some("function_call_output") => {
+                items.push(ConversationItem::FunctionCallOutput(
+                    normalize_function_call_output(object, limits)?,
+                ));
+            }
+            _ => {
+                return Err(invalid("unsupported input item type", Some("input")));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalize_function_call(
+    object: &serde_json::Map<String, Value>,
+    limits: crate::application::ResponsesRequestLimits,
+) -> Result<FunctionCall, WireRequestError> {
+    let call_id = object
+        .get("call_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("function_call call_id is required", Some("input")))
+        .and_then(|value| {
+            CallId::new(value)
+                .map_err(|_| invalid("function_call call_id is invalid", Some("input")))
+        })?;
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("function_call name is required", Some("input")))
+        .and_then(|value| {
+            ToolName::new(value)
+                .map_err(|_| invalid("function_call name is invalid", Some("input")))
+        })?;
+    let arguments = object
+        .get("arguments")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            invalid(
+                "function_call arguments must be a JSON string",
+                Some("input"),
+            )
+        })
+        .and_then(|value| {
+            if value.len() > limits.max_tool_argument_bytes {
+                return Err(WireRequestError {
+                    code: "invalid_tool_arguments",
+                    param: Some("input".to_string()),
+                    message: "function_call arguments exceed the configured size limit".to_string(),
+                });
+            }
+            ToolArguments::parse(value).map_err(|_| WireRequestError {
+                code: "invalid_tool_arguments",
+                param: Some("input".to_string()),
+                message: "function_call arguments are not valid JSON".to_string(),
+            })
+        })?;
+    Ok(FunctionCall {
+        call_id,
+        name,
+        arguments,
+    })
+}
+
+fn normalize_function_call_output(
+    object: &serde_json::Map<String, Value>,
+    limits: crate::application::ResponsesRequestLimits,
+) -> Result<FunctionCallOutput, WireRequestError> {
+    let call_id = object
+        .get("call_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("function_call_output call_id is required", Some("input")))
+        .and_then(|value| {
+            CallId::new(value)
+                .map_err(|_| invalid("function_call_output call_id is invalid", Some("input")))
+        })?;
+    let output = object
+        .get("output")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            invalid(
+                "function_call_output output must be a string",
+                Some("input"),
+            )
+        })?
+        .to_string();
+    if output.len() > limits.max_tool_result_bytes {
+        return Err(WireRequestError {
+            code: "context_length_exceeded",
+            param: Some("input".to_string()),
+            message: "function_call_output exceeds the configured size limit".to_string(),
+        });
+    }
+    let outcome = match object.get("status").and_then(Value::as_str) {
+        None | Some("completed" | "success") => ToolOutcome::Success(output),
+        Some("failed" | "error") => ToolOutcome::Failure(output),
+        Some("rejected") => ToolOutcome::Rejected(output),
+        Some("cancelled") => ToolOutcome::Cancelled(output),
+        Some(_) => {
             return Err(invalid(
-                "only message input items are supported in the text-only phase",
+                "function_call_output status is invalid",
                 Some("input"),
             ));
         }
-        let role = object
-            .get("role")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("message role is required", Some("input")))
-            .and_then(|role| {
-                Role::parse(role).map_err(|_| invalid("message role is invalid", Some("input")))
-            })?;
-        let content = object
-            .get("content")
-            .ok_or_else(|| invalid("message content is required", Some("input")))?;
-        let content = normalize_message_content(content)?;
-        items.push(ConversationItem::Message(
-            Message::new(role, content)
-                .map_err(|_| invalid("message content is invalid", Some("input")))?,
-        ));
-    }
-    Ok(())
+    };
+    Ok(FunctionCallOutput { call_id, outcome })
 }
 
 fn normalize_message_content(content: &Value) -> Result<Vec<ContentPart>, WireRequestError> {
@@ -332,20 +494,184 @@ fn normalize_message_content(content: &Value) -> Result<Vec<ContentPart>, WireRe
         .collect()
 }
 
-fn validate_tool_choice(value: Option<&Value>) -> Result<(), WireRequestError> {
+fn normalize_tools(
+    value: Option<&Value>,
+    policy: UnknownFieldPolicy,
+    limits: crate::application::ResponsesRequestLimits,
+    warnings: &mut Vec<String>,
+) -> Result<ModelToolSet, WireRequestError> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(ModelToolSet::default());
+    };
+    let definitions = value
+        .as_array()
+        .ok_or_else(|| invalid("tools must be an array", Some("tools")))?;
+    let mut tools = Vec::new();
+    let mut names = HashSet::new();
+    let mut total_schema_bytes = 0_usize;
+
+    for (index, definition) in definitions.iter().enumerate() {
+        let object = definition
+            .as_object()
+            .ok_or_else(|| invalid("tool definition must be an object", Some("tools")))?;
+        let tool_type = object
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("tool type is required", Some("tools")))?;
+        if matches!(tool_type, "namespace" | "web_search") {
+            if policy == UnknownFieldPolicy::Strict {
+                return Err(WireRequestError {
+                    code: "unsupported_tool_type",
+                    param: Some("tools".to_string()),
+                    message: format!("tool type {tool_type} is not supported in strict mode"),
+                });
+            }
+            warnings.push(format!("tools[{index}].type={tool_type}"));
+            continue;
+        }
+        if tool_type != "function" {
+            return Err(WireRequestError {
+                code: "unsupported_tool_type",
+                param: Some("tools".to_string()),
+                message: format!("tool type {tool_type} is not supported"),
+            });
+        }
+        if tools.len() >= limits.max_tools {
+            return Err(WireRequestError {
+                code: "invalid_tool_schema",
+                param: Some("tools".to_string()),
+                message: "function tool count exceeds the configured limit".to_string(),
+            });
+        }
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid_tool_schema("function tool name is required"))
+            .and_then(|name| {
+                ToolName::new(name)
+                    .map_err(|_| invalid_tool_schema("function tool name is invalid"))
+            })?;
+        if !names.insert(name.as_str().to_string()) {
+            return Err(invalid_tool_schema("function tool names must be unique"));
+        }
+        let description = object
+            .get("description")
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(ToString::to_string)
+                    .ok_or_else(|| invalid_tool_schema("tool description must be a string"))
+            })
+            .transpose()?;
+        let parameters = object
+            .get("parameters")
+            .ok_or_else(|| invalid_tool_schema("function tool parameters are required"))?;
+        if !parameters.is_object() {
+            return Err(invalid_tool_schema(
+                "function tool parameters must be a JSON Schema object",
+            ));
+        }
+        let schema_bytes = serde_json::to_vec(parameters)
+            .map_err(|_| invalid_tool_schema("function tool parameters cannot be serialized"))?
+            .len();
+        if schema_bytes > limits.max_single_tool_schema_bytes {
+            return Err(invalid_tool_schema(
+                "function tool schema exceeds the per-tool size limit",
+            ));
+        }
+        total_schema_bytes = total_schema_bytes.saturating_add(schema_bytes);
+        if total_schema_bytes > limits.max_tool_schema_bytes {
+            return Err(invalid_tool_schema(
+                "function tool schemas exceed the total size limit",
+            ));
+        }
+        jsonschema::draft7::new(parameters).map_err(|_| {
+            invalid_tool_schema("function tool parameters are not valid JSON Schema")
+        })?;
+        let strict = object
+            .get("strict")
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| invalid_tool_schema("tool strict must be a boolean"))
+            })
+            .transpose()?;
+        tools.push(ModelTool {
+            name,
+            description,
+            parameters: parameters.clone(),
+            strict,
+        });
+    }
+
+    Ok(ModelToolSet::new(tools))
+}
+
+fn normalize_tool_choice(
+    value: Option<&Value>,
+    tools: &ModelToolSet,
+) -> Result<ToolChoice, WireRequestError> {
     match value {
-        None | Some(Value::Null) => Ok(()),
-        Some(Value::String(choice)) if matches!(choice.as_str(), "auto" | "none") => Ok(()),
-        Some(Value::String(choice)) if choice == "required" => Err(WireRequestError {
-            code: "tool_calling_not_supported",
-            param: Some("tool_choice".to_string()),
-            message: "Required Tool calling is not available in this release phase".to_string(),
-        }),
-        Some(_) => Err(WireRequestError {
-            code: "tool_calling_not_supported",
-            param: Some("tool_choice".to_string()),
-            message: "Named Tool calling is not available in this release phase".to_string(),
-        }),
+        None | Some(Value::Null) => Ok(ToolChoice::Auto),
+        Some(Value::String(choice)) if choice == "auto" => Ok(ToolChoice::Auto),
+        Some(Value::String(choice)) if choice == "none" => Ok(ToolChoice::None),
+        Some(Value::String(choice)) if choice == "required" && !tools.tools().is_empty() => {
+            Ok(ToolChoice::Required)
+        }
+        Some(Value::String(choice)) if choice == "required" => Err(invalid(
+            "tool_choice required needs at least one function tool",
+            Some("tool_choice"),
+        )),
+        Some(Value::Object(choice))
+            if choice.get("type").and_then(Value::as_str) == Some("function") =>
+        {
+            let name = choice
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("named tool_choice requires name", Some("tool_choice")))
+                .and_then(|name| {
+                    ToolName::new(name).map_err(|_| {
+                        invalid("named tool_choice name is invalid", Some("tool_choice"))
+                    })
+                })?;
+            if !tools.tools().iter().any(|tool| tool.name == name) {
+                return Err(invalid(
+                    "named tool_choice does not match a provided function tool",
+                    Some("tool_choice"),
+                ));
+            }
+            Ok(ToolChoice::Function(name))
+        }
+        Some(_) => Err(unsupported(
+            "tool_choice",
+            "tool_choice format is not supported",
+        )),
+    }
+}
+
+fn conversation_error(error: ConversationError) -> WireRequestError {
+    match error {
+        ConversationError::OrphanCallOutput(_) => WireRequestError {
+            code: "orphan_function_call_output",
+            param: Some("input".to_string()),
+            message: "function_call_output has no preceding function_call".to_string(),
+        },
+        ConversationError::InvalidToolArguments(_) => WireRequestError {
+            code: "invalid_tool_arguments",
+            param: Some("input".to_string()),
+            message: "function_call arguments are invalid".to_string(),
+        },
+        _ => invalid("input conversation is invalid", Some("input")),
+    }
+}
+
+fn invalid_tool_schema(message: impl Into<String>) -> WireRequestError {
+    WireRequestError {
+        code: "invalid_tool_schema",
+        param: Some("tools".to_string()),
+        message: message.into(),
     }
 }
 
@@ -488,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_and_tool_requests_are_rejected_in_text_only_phase() {
+    fn streaming_is_rejected_until_sse_phase() {
         let stream = decode_request(
             serde_json::json!({
                 "model": "gemma4",
@@ -501,19 +827,199 @@ mod tests {
         .unwrap();
         assert_eq!(stream.code, "unsupported_parameter");
         assert_eq!(stream.param.as_deref(), Some("stream"));
+    }
 
-        let tools = decode_request(
+    #[test]
+    fn function_tools_and_named_choice_normalize_to_domain_contract() {
+        let decoded = decode_request(
             serde_json::json!({
                 "model": "gemma4",
                 "input": "Hello",
-                "tools": [{"type": "function", "name": "read_file"}]
+                "tools": [{
+                    "type": "function",
+                    "name": "read_file",
+                    "description": "Read one file",
+                    "strict": true,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                        "additionalProperties": false
+                    }
+                }],
+                "tool_choice": {"type": "function", "name": "read_file"}
+            }),
+            UnknownFieldPolicy::Compatible,
+        )
+        .unwrap();
+
+        assert_eq!(decoded.tools.tools().len(), 1);
+        assert_eq!(decoded.tools.tools()[0].name.as_str(), "read_file");
+        assert_eq!(decoded.tools.tools()[0].strict, Some(true));
+        assert!(matches!(
+            decoded.tool_choice,
+            ToolChoice::Function(ref name) if name.as_str() == "read_file"
+        ));
+    }
+
+    #[test]
+    fn function_call_and_output_preserve_identity_and_outcome() {
+        let decoded = decode_request(
+            serde_json::json!({
+                "model": "gemma4",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "read_file",
+                        "arguments": "{\"path\":\"README.md\"}"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "Hoshikage"
+                    }
+                ]
+            }),
+            UnknownFieldPolicy::Compatible,
+        )
+        .unwrap();
+
+        let summary = decoded.conversation.summary();
+        assert_eq!(summary.function_calls, 1);
+        assert_eq!(summary.function_outputs, 1);
+        let ConversationItem::FunctionCallOutput(output) = &decoded.conversation.items()[1] else {
+            panic!("second item must be function_call_output");
+        };
+        assert!(matches!(
+            output.outcome,
+            ToolOutcome::Success(ref content) if content == "Hoshikage"
+        ));
+    }
+
+    #[test]
+    fn orphan_function_output_has_stable_error_code() {
+        let error = decode_request(
+            serde_json::json!({
+                "model": "gemma4",
+                "input": [{
+                    "type": "function_call_output",
+                    "call_id": "call_missing",
+                    "output": "orphan"
+                }]
             }),
             UnknownFieldPolicy::Compatible,
         )
         .err()
         .unwrap();
-        assert_eq!(tools.code, "tool_calling_not_supported");
-        assert_eq!(tools.param.as_deref(), Some("tools"));
+
+        assert_eq!(error.code, "orphan_function_call_output");
+        assert_eq!(error.param.as_deref(), Some("input"));
+    }
+
+    #[test]
+    fn previous_response_id_is_ignored_only_with_complete_stateless_tool_history() {
+        let complete = decode_request(
+            serde_json::json!({
+                "model": "gemma4",
+                "previous_response_id": "resp_previous",
+                "input": [
+                    {"type": "message", "role": "user", "content": "Read README"},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "read_file",
+                        "arguments": "{\"path\":\"README.md\"}"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "Hoshikage"
+                    }
+                ]
+            }),
+            UnknownFieldPolicy::Compatible,
+        )
+        .unwrap();
+        assert!(complete
+            .warnings
+            .contains(&"previous_response_id".to_string()));
+
+        let error = decode_request(
+            serde_json::json!({
+                "model": "gemma4",
+                "previous_response_id": "resp_previous",
+                "input": "Continue"
+            }),
+            UnknownFieldPolicy::Compatible,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "previous_response_not_supported");
+        assert_eq!(error.param.as_deref(), Some("previous_response_id"));
+    }
+
+    #[test]
+    fn known_codex_auxiliary_tools_warn_in_compatible_and_fail_in_strict() {
+        let value = serde_json::json!({
+            "model": "gemma4",
+            "input": "Hello",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "read_file",
+                    "parameters": {"type": "object"}
+                },
+                {"type": "namespace", "name": "multi_agent"},
+                {"type": "web_search"}
+            ]
+        });
+
+        let compatible = decode_request(value.clone(), UnknownFieldPolicy::Compatible).unwrap();
+        assert_eq!(compatible.tools.tools().len(), 1);
+        assert_eq!(
+            compatible.warnings,
+            ["tools[1].type=namespace", "tools[2].type=web_search"]
+        );
+
+        let strict = decode_request(value, UnknownFieldPolicy::Strict)
+            .err()
+            .unwrap();
+        assert_eq!(strict.code, "unsupported_tool_type");
+    }
+
+    #[test]
+    fn invalid_or_duplicate_tool_schemas_are_rejected() {
+        let invalid_schema = decode_request(
+            serde_json::json!({
+                "model": "gemma4",
+                "input": "Hello",
+                "tools": [{
+                    "type": "function",
+                    "name": "read_file",
+                    "parameters": {"type": "not-a-json-schema-type"}
+                }]
+            }),
+            UnknownFieldPolicy::Compatible,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(invalid_schema.code, "invalid_tool_schema");
+
+        let duplicate = decode_request(
+            serde_json::json!({
+                "model": "gemma4",
+                "input": "Hello",
+                "tools": [
+                    {"type": "function", "name": "read_file", "parameters": {}},
+                    {"type": "function", "name": "read_file", "parameters": {}}
+                ]
+            }),
+            UnknownFieldPolicy::Compatible,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(duplicate.code, "invalid_tool_schema");
     }
 
     #[test]
@@ -522,10 +1028,12 @@ mod tests {
             id: crate::conversation::ResponseId::new("resp_test").unwrap(),
             created_at: 1_780_000_000,
             model: ModelId::new("gemma4").unwrap(),
-            message: crate::application::CompletedMessage {
-                id: crate::conversation::OutputItemId::new("msg_test").unwrap(),
-                text: "OK".to_string(),
-            },
+            output: crate::application::CompletedOutput::Message(
+                crate::application::CompletedMessage {
+                    id: crate::conversation::OutputItemId::new("msg_test").unwrap(),
+                    text: "OK".to_string(),
+                },
+            ),
             usage: TokenUsage::Measured {
                 input_tokens: 10,
                 output_tokens: 1,
@@ -540,6 +1048,35 @@ mod tests {
         assert_eq!(value["output"][0]["content"][0]["type"], "output_text");
         assert_eq!(value["output"][0]["content"][0]["text"], "OK");
         assert_eq!(value["usage"]["total_tokens"], 11);
+    }
+
+    #[test]
+    fn completed_tool_call_serializes_as_responses_function_call() {
+        let completed = crate::application::CompletedResponse {
+            id: crate::conversation::ResponseId::new("resp_tool").unwrap(),
+            created_at: 1_780_000_000,
+            model: ModelId::new("gemma4").unwrap(),
+            output: crate::application::CompletedOutput::FunctionCall(
+                crate::application::CompletedFunctionCall {
+                    id: crate::conversation::OutputItemId::new("fc_tool").unwrap(),
+                    call_id: CallId::new("call_tool").unwrap(),
+                    name: ToolName::new("read_file").unwrap(),
+                    arguments: ToolArguments::parse(r#"{"path":"README.md"}"#).unwrap(),
+                },
+            ),
+            usage: TokenUsage::Measured {
+                input_tokens: 20,
+                output_tokens: 5,
+            },
+        };
+
+        let value = serde_json::to_value(CompletedResponseWire::from(completed)).unwrap();
+
+        assert_eq!(value["output"][0]["type"], "function_call");
+        assert_eq!(value["output"][0]["call_id"], "call_tool");
+        assert_eq!(value["output"][0]["name"], "read_file");
+        assert_eq!(value["output"][0]["arguments"], r#"{"path":"README.md"}"#);
+        assert_eq!(value["output"][0]["status"], "completed");
     }
 
     #[test]
@@ -564,10 +1101,12 @@ mod tests {
                 id: crate::conversation::ResponseId::new("resp_perf").unwrap(),
                 created_at: 1_780_000_000,
                 model: decoded.model,
-                message: crate::application::CompletedMessage {
-                    id: crate::conversation::OutputItemId::new("msg_perf").unwrap(),
-                    text: "OK".to_string(),
-                },
+                output: crate::application::CompletedOutput::Message(
+                    crate::application::CompletedMessage {
+                        id: crate::conversation::OutputItemId::new("msg_perf").unwrap(),
+                        text: "OK".to_string(),
+                    },
+                ),
                 usage: TokenUsage::Measured {
                     input_tokens: 10,
                     output_tokens: 1,

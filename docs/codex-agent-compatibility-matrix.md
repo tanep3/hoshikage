@@ -1,7 +1,7 @@
 # Hoshikage Codex Agent Compatibility Matrix
 
 **更新日:** 2026-07-27
-**状態:** Phase 0 Fix
+**状態:** Phase 3 Fix
 
 ## 1. Codex CLI
 
@@ -12,8 +12,9 @@
 | 他minor系列 | - | - | - | - | 未検証 |
 
 `0.144.5`は実際の`codex exec`をカスタムResponses Providerへ接続して検証した。
-「複数step前提」はCall/Result再入力のwire shapeを確認したことを表し、Hoshikage製品実装の
-End-to-End完了を表さない。
+Phase 0ではCall/Result再入力のwire shapeを確認した。Phase 3では同じ契約をHoshikage製品へ
+実装し、標準Bundleによる非ストリーム単一Tool Loopを直接APIでEnd-to-End確認した。
+Codex CLIは`stream=true`を要求するため、Codex CLIからの最終E2EはPhase 4で行う。
 
 ## 2. llama-server
 
@@ -74,3 +75,4 @@ CUDAドライバ不整合によりGPU VRAMとlatencyを未検証である。
 - parallel Tool Callは初期版では最大1 Callへ制約する。
 - GPU性能、VRAM、32K contextのGPU実機値は未検証である。
 - Vision、MTP、上位SkillのEnd-to-Endは後続Phaseで検証する。
+- 非ストリーム単一Tool LoopはPhase 3で製品実装済み。SSEはPhase 4で実装する。

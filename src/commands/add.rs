@@ -2,7 +2,8 @@ use crate::error::Result;
 use crate::{
     commands::doctor::check_candidate_model,
     model::{
-        FallbackMode, ModelConfig, SpeculationConfig, SpeculationMode, ThinkingConfig, ThinkingMode,
+        FallbackMode, ModelConfig, SpeculationConfig, SpeculationMode, ThinkingConfig,
+        ThinkingMode, ToolCallingConfig,
     },
 };
 use fs2::FileExt;
@@ -24,6 +25,11 @@ struct AddModelRequest {
     pub speculation: SpeculationConfig,
     #[serde(default)]
     pub thinking: ThinkingConfig,
+    #[serde(
+        default,
+        skip_serializing_if = "ToolCallingConfig::is_disabled_default"
+    )]
+    pub tool_calling: ToolCallingConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n_ctx: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,6 +81,7 @@ async fn add_via_api(port: u16, name: String, config: ModelConfig) -> Result<()>
         drafter: config.drafter,
         speculation: config.speculation,
         thinking: config.thinking,
+        tool_calling: config.tool_calling,
         n_ctx: config.n_ctx,
         n_gpu_layers: config.n_gpu_layers,
     };

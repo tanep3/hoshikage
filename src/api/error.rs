@@ -42,7 +42,7 @@ pub fn responses_error(error: ResponsesServiceError) -> Response {
             "generation_failed",
         ),
         ResponsesServiceError::Inference(InferenceGatewayError::TranslationFailed)
-        | ResponsesServiceError::UnexpectedToolCall
+        | ResponsesServiceError::InvalidToolArguments
         | ResponsesServiceError::Identity => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Response translation failed".to_string(),
@@ -63,6 +63,34 @@ pub fn responses_error(error: ResponsesServiceError) -> Response {
             "invalid_request_error",
             Some("max_output_tokens".to_string()),
             "context_length_exceeded",
+        ),
+        ResponsesServiceError::Inference(InferenceGatewayError::ToolCallingNotSupported) => (
+            StatusCode::BAD_REQUEST,
+            "Model does not support tool calling".to_string(),
+            "invalid_request_error",
+            Some("tools".to_string()),
+            "tool_calling_not_supported",
+        ),
+        ResponsesServiceError::Inference(InferenceGatewayError::InvalidToolSchema) => (
+            StatusCode::BAD_REQUEST,
+            "Tool schema is invalid".to_string(),
+            "invalid_request_error",
+            Some("tools".to_string()),
+            "invalid_tool_schema",
+        ),
+        ResponsesServiceError::Inference(InferenceGatewayError::InvalidToolArguments) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Model generated invalid tool arguments".to_string(),
+            "server_error",
+            None,
+            "invalid_tool_arguments",
+        ),
+        ResponsesServiceError::Inference(InferenceGatewayError::ToolChoiceViolation) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Model did not satisfy tool_choice".to_string(),
+            "server_error",
+            None,
+            "response_translation_failed",
         ),
         ResponsesServiceError::Inference(InferenceGatewayError::UpstreamTimeout) => (
             StatusCode::GATEWAY_TIMEOUT,

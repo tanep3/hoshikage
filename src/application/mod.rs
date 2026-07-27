@@ -1,6 +1,6 @@
 mod responses_service;
 
 pub use responses_service::{
-    CompletedMessage, CompletedResponse, NormalizedResponsesRequest, ResponsesService,
-    ResponsesServiceError,
+    CompletedFunctionCall, CompletedMessage, CompletedOutput, CompletedResponse,
+    NormalizedResponsesRequest, ResponsesRequestLimits, ResponsesService, ResponsesServiceError,
 };

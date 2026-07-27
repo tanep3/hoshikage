@@ -14,7 +14,11 @@ pub async fn responses(
         Ok(payload) => payload,
         Err(error) => return crate::api::error::invalid_json(error.status(), error.body_text()),
     };
-    let request = match super::wire::decode_request(body, service.unknown_field_policy()) {
+    let request = match super::wire::decode_request_with_limits(
+        body,
+        service.unknown_field_policy(),
+        service.request_limits(),
+    ) {
         Ok(request) => request,
         Err(error) => return crate::api::error::wire_request_error(error),
     };
@@ -30,7 +34,8 @@ mod tests {
     use crate::config::UnknownFieldPolicy;
     use crate::conversation::ModelId;
     use crate::inference::{
-        InferenceGateway, InferenceGatewayError, ModelCompletion, ModelRequest, TokenUsage,
+        InferenceGateway, InferenceGatewayError, ModelCompletion, ModelRequest, RawModelToolCall,
+        TokenUsage,
     };
     use async_trait::async_trait;
     use axum::body::{to_bytes, Body};
@@ -57,6 +62,18 @@ mod tests {
             if model.as_str() == "slow" {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
+            if model.as_str() == "tool-model" {
+                return Ok(ModelCompletion::ToolCall {
+                    call: RawModelToolCall {
+                        name: crate::conversation::ToolName::new("read_file").unwrap(),
+                        arguments: r#"{ "path": "README.md" }"#.to_string(),
+                    },
+                    usage: TokenUsage::Measured {
+                        input_tokens: 20,
+                        output_tokens: 5,
+                    },
+                });
+            }
             Ok(ModelCompletion::Text {
                 content: "OK".to_string(),
                 usage: TokenUsage::Measured {
@@ -72,6 +89,13 @@ mod tests {
             Arc::new(FakeGateway),
             UnknownFieldPolicy::Compatible,
             timeout,
+            crate::application::ResponsesRequestLimits {
+                max_tool_schema_bytes: 4096,
+                max_single_tool_schema_bytes: 2048,
+                max_tools: 16,
+                max_tool_argument_bytes: 2048,
+                max_tool_result_bytes: 4096,
+            },
         ));
         Router::new()
             .route("/v1/responses", post(responses))
@@ -180,5 +204,43 @@ mod tests {
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["error"]["code"], "context_length_exceeded");
         assert_eq!(value["error"]["param"], "max_output_tokens");
+    }
+
+    #[tokio::test]
+    async fn tool_request_returns_function_call_without_executing_it() {
+        let response = router()
+            .oneshot(
+                Request::post("/v1/responses")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{
+                            "model": "tool-model",
+                            "input": "Read README.md",
+                            "tools": [{
+                                "type": "function",
+                                "name": "read_file",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"path": {"type": "string"}},
+                                    "required": ["path"]
+                                }
+                            }],
+                            "tool_choice": "auto"
+                        }"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["output"][0]["type"], "function_call");
+        assert_eq!(value["output"][0]["name"], "read_file");
+        assert_eq!(value["output"][0]["arguments"], r#"{"path":"README.md"}"#);
+        assert!(value["output"][0]["call_id"]
+            .as_str()
+            .is_some_and(|call_id| call_id.starts_with("call_")));
     }
 }

@@ -219,6 +219,10 @@ impl Conversation {
         &self.items
     }
 
+    pub fn into_items(self) -> Vec<ConversationItem> {
+        self.items
+    }
+
     pub fn validate(&self) -> Result<ConversationIndex<'_>, ConversationError> {
         let mut calls = HashMap::new();
         let mut outputs = HashSet::new();
