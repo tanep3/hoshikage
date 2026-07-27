@@ -2,10 +2,16 @@ use crate::config::{Config, RuntimeBackendKind};
 use crate::error::Result;
 use crate::inference::llama_wrapper::InferenceParams;
 use crate::inference::{
-    LlamaFfiBackend, LlamaLoadRequest, LlamaServerCommandSpec, LlamaServerLaunchConfig,
-    LlamaServerProcess, LoadedRuntimeInfo, RuntimeBackend, ThinkingController,
-    ThinkingStreamFilter,
+    apply_tool_result_policy, build_chat_request, build_generic_json_request, parse_chat_response,
+    parse_generic_json_completion, validate_native_completion, validate_tool_request,
+    ContextAccuracy, ContextPlan, LlamaFfiBackend, LlamaLoadRequest, LlamaServerChatDefaults,
+    LlamaServerClient, LlamaServerCommandSpec, LlamaServerLaunchConfig, LlamaServerProcess,
+    LlamaServerSseDecoder, LoadedRuntimeInfo, ModelCompletion, ModelDelta, ModelFinishReason,
+    ModelRequest, ModelStreamAction, NativeStreamStrategy, RuntimeBackend, ThinkingController,
+    ThinkingStreamFilter, TokenUsage,
 };
+use crate::model::tool_calling::ToolCallingConfig;
+use crate::runtime::{RuntimeCoordinator, RuntimeEndpoint, RuntimeLease};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -13,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::Semaphore;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
@@ -30,6 +36,11 @@ pub struct ModelConfig {
     pub speculation: SpeculationConfig,
     #[serde(default)]
     pub thinking: ThinkingConfig,
+    #[serde(
+        default,
+        skip_serializing_if = "ToolCallingConfig::is_disabled_default"
+    )]
+    pub tool_calling: crate::model::ToolCallingConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n_ctx: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,25 +72,41 @@ impl Default for SpeculationConfig {
 mod runtime_status_tests {
     use super::*;
 
-    #[test]
-    fn tracks_active_managed_requests_in_status() {
+    #[tokio::test]
+    async fn tracks_active_managed_runtime_lease_in_status() {
         let manager = ModelManager::new(Config::default());
-
-        {
-            let mut state = manager.inference.lock().unwrap();
-            state.current_model = Some("test-model".to_string());
-        }
-
-        manager.begin_managed_request("test-model");
-        manager.begin_managed_request("test-model");
-
-        let status = manager.runtime_status();
-        assert_eq!(status.active_requests, 2);
-
-        manager.finish_managed_request("test-model");
+        let preparation = manager
+            .managed_runtime
+            .prepare(
+                crate::conversation::ModelId::new("test-model").unwrap(),
+                crate::conversation::RequestId::new("request-1").unwrap(),
+            )
+            .await
+            .unwrap();
+        let lease = preparation
+            .activate(
+                crate::runtime::RuntimeEndpoint::new("http://127.0.0.1:13030").unwrap(),
+                LoadedRuntimeInfo {
+                    main_model: PathBuf::from("model.gguf"),
+                    mmproj: None,
+                    draft_model: None,
+                    n_ctx: 16384,
+                    n_gpu_layers: 0,
+                    vision_supported: false,
+                    vision_marker: None,
+                    speculation_enabled: false,
+                    speculation_mode: SpeculationMode::Off,
+                    speculation_fallback_reason: None,
+                },
+            )
+            .unwrap();
 
         let status = manager.runtime_status();
         assert_eq!(status.active_requests, 1);
+
+        drop(lease);
+        let status = manager.runtime_status();
+        assert_eq!(status.active_requests, 0);
     }
 }
 
@@ -162,7 +189,7 @@ fn bundle_total_bytes(files: &[BundleFile]) -> Result<u64> {
     Ok(total)
 }
 
-fn ensure_ramdisk_capacity(path: &PathBuf, required_bytes: u64) -> Result<()> {
+fn ensure_ramdisk_capacity(path: &std::path::Path, required_bytes: u64) -> Result<()> {
     let available = available_bytes(path)?;
     if available < required_bytes {
         return Err(crate::error::HoshikageError::Other(format!(
@@ -173,8 +200,267 @@ fn ensure_ramdisk_capacity(path: &PathBuf, required_bytes: u64) -> Result<()> {
     Ok(())
 }
 
+fn validate_output_token_limit(max_output_tokens: u32, n_ctx: u32) -> Result<()> {
+    if max_output_tokens > n_ctx {
+        return Err(crate::error::HoshikageError::ContextLengthExceeded);
+    }
+    Ok(())
+}
+
+fn is_semantic_tool_error(error: &crate::error::HoshikageError) -> bool {
+    matches!(
+        error,
+        crate::error::HoshikageError::InvalidToolArguments
+            | crate::error::HoshikageError::ToolChoiceViolation
+            | crate::error::HoshikageError::MultipleToolCalls
+            | crate::error::HoshikageError::ResponseTranslationFailed
+    )
+}
+
+fn semantic_retry_mode(
+    config: &ModelConfig,
+    primary: crate::model::ToolCallingMode,
+) -> Option<crate::model::ToolCallingMode> {
+    match primary {
+        crate::model::ToolCallingMode::Native
+            if config.tool_calling.fallback == crate::model::ToolFallback::Json =>
+        {
+            Some(crate::model::ToolCallingMode::Json)
+        }
+        crate::model::ToolCallingMode::Json => Some(crate::model::ToolCallingMode::Json),
+        crate::model::ToolCallingMode::Native | crate::model::ToolCallingMode::Disabled => None,
+    }
+}
+
+fn should_retry_stream_semantic_error(
+    error: &crate::error::HoshikageError,
+    emitted_actions: bool,
+    config: &ModelConfig,
+    primary: crate::model::ToolCallingMode,
+) -> bool {
+    !emitted_actions
+        && is_semantic_tool_error(error)
+        && semantic_retry_mode(config, primary) == Some(crate::model::ToolCallingMode::Json)
+        && primary == crate::model::ToolCallingMode::Native
+}
+
+fn buffered_completion_actions(completion: ModelCompletion) -> Vec<ModelStreamAction> {
+    match completion {
+        ModelCompletion::Text { content, usage } => vec![
+            ModelStreamAction::BeginText,
+            ModelStreamAction::AppendText(content),
+            ModelStreamAction::FinishText,
+            ModelStreamAction::Complete { usage },
+        ],
+        ModelCompletion::ToolCall { call, usage } => vec![
+            ModelStreamAction::BeginFunctionCall { name: call.name },
+            ModelStreamAction::AppendArguments(call.arguments),
+            ModelStreamAction::FinishFunctionCall,
+            ModelStreamAction::Complete { usage },
+        ],
+    }
+}
+
+#[derive(Default)]
+struct NativeAttemptBuffer {
+    actions: Vec<ModelStreamAction>,
+}
+
+impl NativeAttemptBuffer {
+    fn hold(&mut self, actions: Vec<ModelStreamAction>) {
+        self.actions.extend(actions);
+    }
+
+    fn commit(mut self, completion: ModelStreamAction) -> Vec<ModelStreamAction> {
+        self.actions.push(completion);
+        self.actions
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BufferedRetryLimits {
+    context_window: u32,
+    first_timeout: Duration,
+    generation_timeout: Duration,
+}
+
+async fn execute_buffered_json_stream_retry(
+    client: &LlamaServerClient,
+    endpoint: &RuntimeEndpoint,
+    body: &serde_json::Value,
+    request: &ModelRequest,
+    model_config: &ModelConfig,
+    limits: BufferedRetryLimits,
+) -> Result<ModelCompletion> {
+    #[derive(Deserialize)]
+    struct InputTokensResponse {
+        input_tokens: u32,
+    }
+
+    let token_response = tokio::time::timeout(
+        limits.first_timeout,
+        client.chat_input_tokens(endpoint, body),
+    )
+    .await
+    .map_err(|_| crate::error::HoshikageError::UpstreamTimeout)??;
+    if !token_response.status().is_success() {
+        return Err(crate::error::HoshikageError::InferenceError(format!(
+            "llama-server returned HTTP {} while planning JSON fallback",
+            token_response.status()
+        )));
+    }
+    let input_tokens = token_response
+        .json::<InputTokensResponse>()
+        .await
+        .map_err(|_| crate::error::HoshikageError::ResponseTranslationFailed)?
+        .input_tokens;
+    if input_tokens.saturating_add(request.max_output_tokens) > limits.context_window {
+        return Err(crate::error::HoshikageError::ContextLengthExceeded);
+    }
+
+    let response = tokio::time::timeout(
+        limits.first_timeout,
+        client.chat_completions(endpoint, body),
+    )
+    .await
+    .map_err(|_| crate::error::HoshikageError::UpstreamTimeout)??;
+    if !response.status().is_success() {
+        return Err(crate::error::HoshikageError::InferenceError(format!(
+            "llama-server returned HTTP {} during JSON fallback",
+            response.status()
+        )));
+    }
+    let bytes = tokio::time::timeout(limits.generation_timeout, response.bytes())
+        .await
+        .map_err(|_| crate::error::HoshikageError::UpstreamTimeout)?
+        .map_err(|_| crate::error::HoshikageError::UpstreamDisconnected)?;
+    let completion = parse_generic_json_completion(
+        parse_chat_response(&bytes)?,
+        model_config.tool_calling.repair_invalid_json,
+    )?;
+    validate_native_completion(completion, request, model_config)
+}
+
+#[cfg(test)]
+mod stream_retry_tests {
+    use super::*;
+
+    fn native_with_json_fallback() -> ModelConfig {
+        ModelConfig {
+            path: String::new(),
+            model: "model.gguf".to_string(),
+            stop: Vec::new(),
+            mmproj: None,
+            drafter: None,
+            speculation: SpeculationConfig::default(),
+            thinking: ThinkingConfig::default(),
+            tool_calling: ToolCallingConfig {
+                mode: crate::model::ToolCallingMode::Native,
+                fallback: crate::model::ToolFallback::Json,
+                ..ToolCallingConfig::default()
+            },
+            n_ctx: Some(16_384),
+            n_gpu_layers: None,
+        }
+    }
+
+    #[test]
+    fn retries_native_semantic_failure_only_before_output_is_emitted() {
+        let config = native_with_json_fallback();
+        let error = crate::error::HoshikageError::ToolChoiceViolation;
+
+        assert!(should_retry_stream_semantic_error(
+            &error,
+            false,
+            &config,
+            crate::model::ToolCallingMode::Native,
+        ));
+        assert!(!should_retry_stream_semantic_error(
+            &error,
+            true,
+            &config,
+            crate::model::ToolCallingMode::Native,
+        ));
+    }
+
+    #[test]
+    fn does_not_retry_transport_failure_or_disabled_fallback() {
+        let mut config = native_with_json_fallback();
+        assert!(!should_retry_stream_semantic_error(
+            &crate::error::HoshikageError::UpstreamDisconnected,
+            false,
+            &config,
+            crate::model::ToolCallingMode::Native,
+        ));
+
+        config.tool_calling.fallback = crate::model::ToolFallback::None;
+        assert!(!should_retry_stream_semantic_error(
+            &crate::error::HoshikageError::ToolChoiceViolation,
+            false,
+            &config,
+            crate::model::ToolCallingMode::Native,
+        ));
+    }
+
+    #[test]
+    fn native_attempt_is_held_until_the_whole_response_is_validated() {
+        let mut buffer = NativeAttemptBuffer::default();
+        let name = crate::conversation::ToolName::new("read_file").unwrap();
+        let usage = TokenUsage::Measured {
+            input_tokens: 1,
+            output_tokens: 1,
+        };
+
+        buffer.hold(vec![
+            ModelStreamAction::BeginFunctionCall { name: name.clone() },
+            ModelStreamAction::AppendArguments("{\"path\":".to_string()),
+        ]);
+        buffer.hold(vec![
+            ModelStreamAction::AppendArguments("\"README.md\"}".to_string()),
+            ModelStreamAction::FinishFunctionCall,
+        ]);
+
+        assert_eq!(
+            buffer.commit(ModelStreamAction::Complete {
+                usage: usage.clone(),
+            }),
+            vec![
+                ModelStreamAction::BeginFunctionCall { name },
+                ModelStreamAction::AppendArguments("{\"path\":".to_string()),
+                ModelStreamAction::AppendArguments("\"README.md\"}".to_string()),
+                ModelStreamAction::FinishFunctionCall,
+                ModelStreamAction::Complete { usage },
+            ]
+        );
+    }
+
+    #[test]
+    fn native_text_is_not_published_before_the_attempt_is_complete() {
+        let mut buffer = NativeAttemptBuffer::default();
+        let usage = TokenUsage::Measured {
+            input_tokens: 1,
+            output_tokens: 1,
+        };
+        buffer.hold(vec![
+            ModelStreamAction::BeginText,
+            ModelStreamAction::AppendText("checking".to_string()),
+        ]);
+
+        assert_eq!(
+            buffer.commit(ModelStreamAction::Complete {
+                usage: usage.clone(),
+            }),
+            vec![
+                ModelStreamAction::BeginText,
+                ModelStreamAction::AppendText("checking".to_string()),
+                ModelStreamAction::Complete { usage },
+            ]
+        );
+    }
+}
+
 #[cfg(target_family = "unix")]
-fn available_bytes(path: &PathBuf) -> Result<u64> {
+fn available_bytes(path: &std::path::Path) -> Result<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -186,12 +472,40 @@ fn available_bytes(path: &PathBuf) -> Result<u64> {
     }
 
     let stat = unsafe { stat.assume_init() };
-    Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+    let available_blocks = FilesystemUnsigned::into_u64(stat.f_bavail);
+    let block_size = FilesystemUnsigned::into_u64(stat.f_frsize);
+    checked_capacity_bytes(available_blocks, block_size)
 }
 
 #[cfg(not(target_family = "unix"))]
-fn available_bytes(_path: &PathBuf) -> Result<u64> {
+fn available_bytes(_path: &std::path::Path) -> Result<u64> {
     Ok(u64::MAX)
+}
+
+#[cfg(target_family = "unix")]
+trait FilesystemUnsigned {
+    fn into_u64(self) -> u64;
+}
+
+#[cfg(target_family = "unix")]
+impl FilesystemUnsigned for u32 {
+    fn into_u64(self) -> u64 {
+        u64::from(self)
+    }
+}
+
+#[cfg(target_family = "unix")]
+impl FilesystemUnsigned for u64 {
+    fn into_u64(self) -> u64 {
+        self
+    }
+}
+
+#[cfg(any(target_family = "unix", test))]
+fn checked_capacity_bytes(blocks: u64, block_size: u64) -> Result<u64> {
+    blocks.checked_mul(block_size).ok_or_else(|| {
+        crate::error::HoshikageError::Other("available filesystem capacity exceeds u64".to_string())
+    })
 }
 
 #[cfg(test)]
@@ -200,6 +514,12 @@ mod ramdisk_tests {
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("hoshikage-{}-{}", name, uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn filesystem_capacity_calculation_rejects_overflow() {
+        assert_eq!(checked_capacity_bytes(4, 4096).unwrap(), 16_384);
+        assert!(checked_capacity_bytes(u64::MAX, 2).is_err());
     }
 
     fn write_file(path: &PathBuf, content: &str) {
@@ -309,9 +629,11 @@ mod ramdisk_tests {
 
     #[test]
     fn load_request_uses_model_overrides_and_ramdisk_aux_paths() {
-        let mut runtime_config = Config::default();
-        runtime_config.n_ctx = 4096;
-        runtime_config.n_gpu_layers = 10;
+        let runtime_config = Config {
+            n_ctx: 4096,
+            n_gpu_layers: 10,
+            ..Config::default()
+        };
         let manager = ModelManager::new(runtime_config);
         let model_config = ModelConfig {
             mmproj: Some("mmproj-source.gguf".to_string()),
@@ -350,32 +672,22 @@ mod ramdisk_tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SpeculationMode {
+    #[default]
     Off,
     Mtp,
     DraftModel,
 }
 
-impl Default for SpeculationMode {
-    fn default() -> Self {
-        Self::Off
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FallbackMode {
+    #[default]
     Warn,
     Strict,
     Off,
-}
-
-impl Default for FallbackMode {
-    fn default() -> Self {
-        Self::Warn
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -392,17 +704,12 @@ impl Default for ThinkingConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingMode {
+    #[default]
     Auto,
     Off,
-}
-
-impl Default for ThinkingMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl ModelConfig {
@@ -415,6 +722,7 @@ impl ModelConfig {
             drafter: None,
             speculation: SpeculationConfig::default(),
             thinking: ThinkingConfig::default(),
+            tool_calling: ToolCallingConfig::default(),
             n_ctx: None,
             n_gpu_layers: None,
         }
@@ -428,6 +736,37 @@ impl ModelConfig {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[test]
+    fn output_token_limit_cannot_exceed_model_context() {
+        assert!(validate_output_token_limit(4096, 4096).is_ok());
+        assert!(matches!(
+            validate_output_token_limit(4097, 4096),
+            Err(crate::error::HoshikageError::ContextLengthExceeded)
+        ));
+    }
+
+    #[test]
+    fn semantic_retry_budget_selects_one_json_attempt() {
+        let mut config =
+            ModelConfig::new_legacy("/models".to_string(), "model.gguf".to_string(), Vec::new());
+        config.tool_calling.mode = crate::model::ToolCallingMode::Native;
+        config.tool_calling.fallback = crate::model::ToolFallback::Json;
+
+        assert_eq!(
+            semantic_retry_mode(&config, crate::model::ToolCallingMode::Native),
+            Some(crate::model::ToolCallingMode::Json)
+        );
+        assert_eq!(
+            semantic_retry_mode(&config, crate::model::ToolCallingMode::Json),
+            Some(crate::model::ToolCallingMode::Json)
+        );
+        config.tool_calling.fallback = crate::model::ToolFallback::None;
+        assert_eq!(
+            semantic_retry_mode(&config, crate::model::ToolCallingMode::Native),
+            None
+        );
+    }
 
     #[test]
     fn legacy_model_config_deserializes_from_path() {
@@ -543,9 +882,15 @@ pub struct LoadedRuntimeInfoSnapshot {
     pub speculation_fallback_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HoshikageModelInfo {
     pub id: String,
+    pub context_window: u32,
+    pub codex_compatible: bool,
+    pub responses: bool,
+    pub streaming: bool,
+    pub buffered_tool_classification: bool,
+    pub tools: bool,
     pub main_model_configured: bool,
     pub vision: bool,
     pub mmproj_configured: bool,
@@ -553,6 +898,9 @@ pub struct HoshikageModelInfo {
     pub draft_model_configured: bool,
     pub thinking: ThinkingMode,
     pub fallback: FallbackMode,
+    pub reasoning: bool,
+    pub tool_calling_mode: crate::model::ToolCallingMode,
+    pub tool_parser: crate::model::ToolParserId,
 }
 
 impl From<LoadedRuntimeInfo> for LoadedRuntimeInfoSnapshot {
@@ -568,6 +916,32 @@ impl From<LoadedRuntimeInfo> for LoadedRuntimeInfoSnapshot {
             speculation_enabled: info.speculation_enabled,
             speculation_mode: info.speculation_mode,
             speculation_fallback_reason: info.speculation_fallback_reason,
+        }
+    }
+}
+
+impl HoshikageModelInfo {
+    fn from_bundle(id: String, config: ModelConfig, default_context_window: u32) -> Self {
+        Self {
+            id,
+            context_window: crate::codex::effective_context_window(&config, default_context_window),
+            codex_compatible: crate::codex::is_codex_compatible(&config, default_context_window),
+            responses: true,
+            streaming: true,
+            buffered_tool_classification: config.tool_calling.mode
+                == crate::model::ToolCallingMode::Json,
+            tools: config.tool_calling.mode != crate::model::ToolCallingMode::Disabled,
+            main_model_configured: !config.model.is_empty(),
+            vision: config.mmproj.is_some(),
+            mmproj_configured: config.mmproj.is_some(),
+            mtp_configured: config.speculation.has_mode(SpeculationMode::Mtp),
+            draft_model_configured: config.speculation.has_mode(SpeculationMode::DraftModel)
+                && config.drafter.is_some(),
+            thinking: config.thinking.mode,
+            fallback: config.speculation.fallback,
+            reasoning: false,
+            tool_calling_mode: config.tool_calling.mode,
+            tool_parser: config.tool_calling.effective_parser(),
         }
     }
 }
@@ -621,16 +995,22 @@ struct RamdiskManifestFile {
 }
 
 pub struct ModelManager {
-    models: Arc<RwLock<HashMap<String, ModelConfig>>>,
+    registry: crate::model::ModelRegistry,
     config: Config,
     inference: Arc<Mutex<InferenceState>>,
     semaphore: Arc<Semaphore>,
+    managed_runtime: RuntimeCoordinator,
+    llama_server_client: LlamaServerClient,
 }
 
 impl ModelManager {
     pub fn new(config: Config) -> Self {
+        let managed_runtime = RuntimeCoordinator::new(
+            config.responses_queue_capacity,
+            Duration::from_millis(config.responses_queue_timeout_ms),
+        );
         Self {
-            models: Arc::new(RwLock::new(HashMap::new())),
+            registry: crate::model::ModelRegistry::new(config.clone()),
             config,
             inference: Arc::new(Mutex::new(InferenceState {
                 backend: None,
@@ -643,27 +1023,32 @@ impl ModelManager {
                 last_access: Instant::now(),
             })),
             semaphore: Arc::new(Semaphore::new(1)),
+            managed_runtime,
+            llama_server_client: LlamaServerClient::new(),
         }
+    }
+
+    pub async fn send_managed_chat(
+        &self,
+        lease: &RuntimeLease,
+        body: &serde_json::Value,
+    ) -> reqwest::Result<reqwest::Response> {
+        self.llama_server_client
+            .chat_completions(lease.endpoint(), body)
+            .await
     }
 
     pub async fn load_models(&self) -> Result<()> {
         let model_map_path = self.config.model_map_path()?;
 
-        if model_map_path.exists() {
-            let content = std::fs::read_to_string(&model_map_path)?;
-            let models: HashMap<String, ModelConfig> = serde_json::from_str(&content)?;
-            let mut models_guard = self.models.write().await;
-            *models_guard = models;
-
+        if self.registry.load().await? {
             tracing::info!(
                 "Loaded {} models from {}",
-                models_guard.len(),
+                self.registry.names().await.len(),
                 model_map_path.display()
             );
         } else if let Some(models) = self.scan_model_dir()? {
-            let mut models_guard = self.models.write().await;
-            *models_guard = models;
-            drop(models_guard);
+            self.registry.replace(models).await;
             self.save_models().await?;
             tracing::info!(
                 "Model map file not found. Scanned model directory and saved to {}",
@@ -677,40 +1062,15 @@ impl ModelManager {
     }
 
     pub async fn save_models(&self) -> Result<()> {
-        let model_map_path = self.config.model_map_path()?;
-
-        let content = serde_json::to_string_pretty(&*self.models.read().await)?;
-
-        if let Some(parent) = model_map_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        std::fs::write(&model_map_path, &content)?;
-
-        tracing::info!(
-            "Saved {} models to {}",
-            content.lines().count(),
-            model_map_path.display()
-        );
-
-        Ok(())
+        self.registry.save().await
     }
 
     pub async fn get_model(&self, name: &str) -> Result<ModelConfig> {
-        let models = self.models.read().await;
-
-        models
-            .get(name)
-            .cloned()
-            .ok_or_else(|| crate::error::HoshikageError::ModelNotFound(name.to_string()))
+        self.registry.get(name).await
     }
 
     pub async fn add_model(&self, name: String, config: ModelConfig) -> Result<()> {
-        let mut models = self.models.write().await;
-
-        models.insert(name.clone(), config);
-        drop(models);
-        self.save_models().await?;
+        self.registry.insert(name.clone(), config).await?;
 
         tracing::info!("Added model: {}", name);
 
@@ -718,11 +1078,7 @@ impl ModelManager {
     }
 
     pub async fn remove_model(&self, name: &str) -> Result<()> {
-        let mut models = self.models.write().await;
-
-        if models.remove(name).is_some() {
-            drop(models);
-            self.save_models().await?;
+        if self.registry.remove(name).await? {
             tracing::info!("Removed model: {}", name);
         }
 
@@ -730,25 +1086,14 @@ impl ModelManager {
     }
 
     pub async fn list_models(&self) -> Vec<String> {
-        let models = self.models.read().await;
-        models.keys().cloned().collect()
+        self.registry.names().await
     }
 
     pub async fn list_hoshikage_models(&self) -> Vec<HoshikageModelInfo> {
-        let models = self.models.read().await;
+        let models = self.registry.snapshot().await;
         let mut data = models
-            .iter()
-            .map(|(name, config)| HoshikageModelInfo {
-                id: name.clone(),
-                main_model_configured: !config.model.is_empty(),
-                vision: config.mmproj.is_some(),
-                mmproj_configured: config.mmproj.is_some(),
-                mtp_configured: config.speculation.has_mode(SpeculationMode::Mtp),
-                draft_model_configured: config.speculation.has_mode(SpeculationMode::DraftModel)
-                    && config.drafter.is_some(),
-                thinking: config.thinking.mode.clone(),
-                fallback: config.speculation.fallback.clone(),
-            })
+            .into_iter()
+            .map(|(name, config)| HoshikageModelInfo::from_bundle(name, config, self.config.n_ctx))
             .collect::<Vec<_>>();
         data.sort_by(|a, b| a.id.cmp(&b.id));
         data
@@ -756,17 +1101,11 @@ impl ModelManager {
 
     pub async fn get_hoshikage_model(&self, name: &str) -> Result<HoshikageModelInfo> {
         let config = self.get_model(name).await?;
-        Ok(HoshikageModelInfo {
-            id: name.to_string(),
-            main_model_configured: !config.model.is_empty(),
-            vision: config.mmproj.is_some(),
-            mmproj_configured: config.mmproj.is_some(),
-            mtp_configured: config.speculation.has_mode(SpeculationMode::Mtp),
-            draft_model_configured: config.speculation.has_mode(SpeculationMode::DraftModel)
-                && config.drafter.is_some(),
-            thinking: config.thinking.mode,
-            fallback: config.speculation.fallback,
-        })
+        Ok(HoshikageModelInfo::from_bundle(
+            name.to_string(),
+            config,
+            self.config.n_ctx,
+        ))
     }
 
     pub fn runtime_status(&self) -> RuntimeStatusSnapshot {
@@ -810,7 +1149,7 @@ impl ModelManager {
                     .map(LoadedRuntimeInfoSnapshot::from)
             },
             last_fallback: state.last_fallback.clone(),
-            active_requests: state.active_requests,
+            active_requests: self.managed_runtime.active_requests(),
         }
     }
 
@@ -834,34 +1173,71 @@ impl ModelManager {
         self.config.runtime_backend == RuntimeBackendKind::LlamaServerManaged
     }
 
-    pub fn begin_managed_request(&self, model_name: &str) {
-        let Ok(mut state) = self.inference.lock() else {
-            tracing::error!("Failed to lock inference state when beginning managed request");
-            return;
-        };
-        if state.current_model.as_deref() == Some(model_name) {
-            state.active_requests = state.active_requests.saturating_add(1);
-            state.last_access = Instant::now();
-        }
+    pub fn responses_unknown_field_policy(&self) -> crate::config::UnknownFieldPolicy {
+        self.config.responses_unknown_field_policy
     }
 
-    pub fn finish_managed_request(&self, model_name: &str) {
-        let Ok(mut state) = self.inference.lock() else {
-            tracing::error!("Failed to lock inference state when finishing managed request");
-            return;
-        };
-        if state.current_model.as_deref() == Some(model_name) {
-            state.active_requests = state.active_requests.saturating_sub(1);
-            state.last_access = Instant::now();
-        }
+    pub fn max_request_bytes(&self) -> usize {
+        self.config.max_request_bytes
     }
 
-    pub async fn ensure_managed_llama_server(&self, model_name: &str) -> Result<String> {
-        let _permit =
-            self.semaphore.clone().acquire_owned().await.map_err(|e| {
-                crate::error::HoshikageError::Other(format!("Semaphore error: {}", e))
+    pub fn max_tool_schema_bytes(&self) -> usize {
+        self.config.max_tool_schema_bytes
+    }
+
+    pub fn max_single_tool_schema_bytes(&self) -> usize {
+        self.config.max_single_tool_schema_bytes
+    }
+
+    pub fn max_tools(&self) -> usize {
+        self.config.max_tools
+    }
+
+    pub fn max_tool_argument_bytes(&self) -> usize {
+        self.config.max_tool_argument_bytes
+    }
+
+    pub fn max_tool_result_bytes(&self) -> usize {
+        self.config.max_tool_result_bytes
+    }
+
+    pub fn responses_timeout_secs(&self) -> u64 {
+        self.config.responses_timeout_secs
+    }
+
+    pub fn debug_capture_enabled(&self) -> bool {
+        self.config.debug_capture
+    }
+
+    pub fn debug_capture_path(&self) -> Result<PathBuf> {
+        self.config.debug_capture_path()
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.config.validate().is_ok() && self.managed_runtime.phase().is_ok()
+    }
+
+    pub async fn acquire_managed_llama_server(&self, model_name: &str) -> Result<RuntimeLease> {
+        self.reconcile_managed_runtime_state()?;
+        let model_id = crate::conversation::ModelId::new(model_name).map_err(|error| {
+            crate::error::HoshikageError::ConfigError(format!("invalid model id: {error}"))
+        })?;
+        let request_id =
+            crate::conversation::RequestId::new(format!("req_{}", uuid::Uuid::new_v4().simple()))
+                .map_err(|error| {
+                crate::error::HoshikageError::Other(format!("failed to create request id: {error}"))
             })?;
-
+        let preparation = self
+            .managed_runtime
+            .prepare(model_id, request_id)
+            .await
+            .map_err(|error| match error {
+                crate::runtime::RuntimeAcquireError::ServerBusy
+                | crate::runtime::RuntimeAcquireError::QueueTimeout => {
+                    crate::error::HoshikageError::ServerBusy
+                }
+                other => crate::error::HoshikageError::Other(other.to_string()),
+            })?;
         let model_config = self.get_model(model_name).await?;
         let endpoint = self.llama_server_base_url();
         let mut started = false;
@@ -881,12 +1257,6 @@ impl ModelManager {
                 state.current_model.as_deref() == Some(model_name) && managed_running;
 
             if !current_loaded {
-                if state.active_requests > 0 {
-                    return Err(crate::error::HoshikageError::Other(format!(
-                        "managed runtime is busy with {} active request(s)",
-                        state.active_requests
-                    )));
-                }
                 self.stop_loaded_runtime(&mut state);
                 let (model_path, ramdisk_bundle) =
                     self.resolve_model_path(model_name, &model_config)?;
@@ -919,7 +1289,51 @@ impl ModelManager {
             }
         }
 
-        Ok(endpoint)
+        let loaded = {
+            let state = self.inference.lock().map_err(|error| {
+                crate::error::HoshikageError::Other(format!("Lock error: {error}"))
+            })?;
+            state.managed_loaded_info.clone().ok_or_else(|| {
+                crate::error::HoshikageError::InferenceError(
+                    "managed llama-server has no loaded runtime information".to_string(),
+                )
+            })?
+        };
+        let endpoint = RuntimeEndpoint::new(endpoint)
+            .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))?;
+        preparation
+            .activate(endpoint, loaded)
+            .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))
+    }
+
+    fn reconcile_managed_runtime_state(&self) -> Result<()> {
+        let phase = self
+            .managed_runtime
+            .phase()
+            .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))?;
+        let crate::runtime::RuntimePhase::Ready(ready) = phase else {
+            return Ok(());
+        };
+        let observed_ready = {
+            let mut state = self.inference.lock().map_err(|error| {
+                crate::error::HoshikageError::Other(format!("Lock error: {error}"))
+            })?;
+            let running = state
+                .managed_server
+                .as_mut()
+                .map(|server| server.is_running())
+                .unwrap_or(false);
+            running && state.current_model.as_deref() == Some(ready.model.as_str())
+        };
+        if !observed_ready {
+            self.managed_runtime
+                .mark_unhealthy(
+                    ready.generation,
+                    "coordinator state did not match managed process state",
+                )
+                .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))?;
+        }
+        Ok(())
     }
 
     async fn start_managed_server_without_speculation(
@@ -992,16 +1406,17 @@ impl ModelManager {
 
                 let idle_secs = state.last_access.elapsed().as_secs();
 
-                if state.active_requests > 0 {
+                if self.managed_runtime.active_requests() > 0 || state.active_requests > 0 {
                     continue;
                 }
 
-                if idle_timeout > 0 && idle_secs >= idle_timeout {
-                    if state.backend.is_some() || state.managed_server.is_some() {
-                        self.stop_loaded_runtime(&mut state);
-                        state.current_model = None;
-                        tracing::info!("Unloaded model due to idle timeout");
-                    }
+                if idle_timeout > 0
+                    && idle_secs >= idle_timeout
+                    && (state.backend.is_some() || state.managed_server.is_some())
+                {
+                    self.stop_loaded_runtime(&mut state);
+                    state.current_model = None;
+                    tracing::info!("Unloaded model due to idle timeout");
                 }
 
                 if great_timeout > 0 && idle_secs >= great_timeout * 60 {
@@ -1092,10 +1507,535 @@ impl ModelManager {
         Ok((output, prompt_tokens, completion_tokens))
     }
 
+    pub async fn complete_model_request(
+        &self,
+        model: &crate::conversation::ModelId,
+        mut request: ModelRequest,
+    ) -> Result<ModelCompletion> {
+        let model_config = self.get_model(model.as_str()).await?;
+        validate_tool_request(&request, &model_config)?;
+        apply_tool_result_policy(&mut request, &model_config)?;
+        if !request.tools.tools().is_empty() {
+            tracing::info!(
+                model = model.as_str(),
+                tools_count = request.tools.tools().len(),
+                mode = ?model_config.tool_calling.mode,
+                parser = ?model_config.tool_calling.effective_parser(),
+                strict = model_config.tool_calling.strict,
+                fallback = ?model_config.tool_calling.fallback,
+                "Prepared Tool Calling request"
+            );
+        }
+        validate_output_token_limit(
+            request.max_output_tokens,
+            model_config.n_ctx.unwrap_or(self.config.n_ctx),
+        )?;
+        if self.uses_managed_llama_server() {
+            let defaults = LlamaServerChatDefaults {
+                temperature: self.default_temperature(),
+                top_p: self.default_top_p(),
+                repeat_penalty: self.default_repeat_penalty(),
+            };
+            let uses_tools = !request.tools.tools().is_empty();
+            let primary_mode = if uses_tools {
+                model_config.tool_calling.mode
+            } else {
+                crate::model::ToolCallingMode::Disabled
+            };
+            let body = match primary_mode {
+                crate::model::ToolCallingMode::Json => {
+                    build_generic_json_request(model, &request, &model_config, &defaults)?
+                }
+                crate::model::ToolCallingMode::Native | crate::model::ToolCallingMode::Disabled => {
+                    build_chat_request(model, &request, &model_config, &defaults)?
+                }
+            };
+            let lease = self.acquire_managed_llama_server(model.as_str()).await?;
+            let primary = self
+                .execute_managed_completion(
+                    model,
+                    &lease,
+                    &body,
+                    primary_mode,
+                    &request,
+                    &model_config,
+                )
+                .await;
+            let completion = match primary {
+                Ok(completion) => completion,
+                Err(error)
+                    if uses_tools
+                        && is_semantic_tool_error(&error)
+                        && semantic_retry_mode(&model_config, primary_mode).is_some() =>
+                {
+                    let Some(retry_mode) = semantic_retry_mode(&model_config, primary_mode) else {
+                        return Err(error);
+                    };
+                    tracing::warn!(
+                        model = model.as_str(),
+                        primary_mode = ?primary_mode,
+                        retry_mode = ?retry_mode,
+                        error_class = %error,
+                        "Retrying Tool generation within semantic budget"
+                    );
+                    let retry_body =
+                        build_generic_json_request(model, &request, &model_config, &defaults)?;
+                    self.execute_managed_completion(
+                        model,
+                        &lease,
+                        &retry_body,
+                        retry_mode,
+                        &request,
+                        &model_config,
+                    )
+                    .await?
+                }
+                Err(error) => return Err(error),
+            };
+            lease
+                .finish()
+                .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))?;
+            return Ok(completion);
+        }
+
+        if !request.tools.tools().is_empty() {
+            return Err(crate::error::HoshikageError::ToolCallingNotSupported);
+        }
+        let messages = request
+            .conversation
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                crate::conversation::ConversationItem::Message(message) => Some(message.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let prompt = self.build_prompt(model.as_str(), &messages).await?;
+        let params = InferenceParams {
+            temperature: request
+                .sampling
+                .temperature
+                .unwrap_or(self.default_temperature()),
+            top_p: request.sampling.top_p.unwrap_or(self.default_top_p()),
+            max_tokens: request.max_output_tokens.min(i32::MAX as u32) as i32,
+            stop_sequences: model_config.stop,
+            presence_penalty: request.sampling.presence_penalty.unwrap_or(0.0),
+            frequency_penalty: request.sampling.frequency_penalty.unwrap_or(0.0),
+            repeat_penalty: self.default_repeat_penalty(),
+            repeat_last_n: self.default_repeat_last_n() as usize,
+            diffusion_steps: None,
+            diffusion_algorithm: None,
+            diffusion_schedule: None,
+            diffusion_cfg_scale: None,
+        };
+        let (content, input_tokens, output_tokens) =
+            self.generate(model.as_str(), &prompt, params).await?;
+        Ok(ModelCompletion::Text {
+            content,
+            usage: TokenUsage::Measured {
+                input_tokens,
+                output_tokens,
+            },
+        })
+    }
+
+    pub async fn stream_model_request(
+        &self,
+        model: &crate::conversation::ModelId,
+        mut request: ModelRequest,
+    ) -> Result<
+        std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = crate::Result<ModelStreamAction>> + Send + 'static>,
+        >,
+    > {
+        use futures_util::StreamExt;
+
+        let model_config = self.get_model(model.as_str()).await?;
+        request.stream = true;
+        validate_tool_request(&request, &model_config)?;
+        apply_tool_result_policy(&mut request, &model_config)?;
+        validate_output_token_limit(
+            request.max_output_tokens,
+            model_config.n_ctx.unwrap_or(self.config.n_ctx),
+        )?;
+        if !self.uses_managed_llama_server() {
+            return Err(crate::error::HoshikageError::ConfigError(
+                "Responses streaming requires the managed llama-server runtime".to_string(),
+            ));
+        }
+
+        let defaults = LlamaServerChatDefaults {
+            temperature: self.default_temperature(),
+            top_p: self.default_top_p(),
+            repeat_penalty: self.default_repeat_penalty(),
+        };
+        let uses_tools = !request.tools.tools().is_empty();
+        let mode = if uses_tools {
+            model_config.tool_calling.mode
+        } else {
+            crate::model::ToolCallingMode::Disabled
+        };
+        if uses_tools {
+            tracing::info!(
+                model = model.as_str(),
+                stream = true,
+                tools_count = request.tools.tools().len(),
+                mode = ?mode,
+                parser = ?model_config.tool_calling.effective_parser(),
+                strict = model_config.tool_calling.strict,
+                fallback = ?model_config.tool_calling.fallback,
+                "Prepared Tool Calling request"
+            );
+        }
+        let body = match mode {
+            crate::model::ToolCallingMode::Json => {
+                build_generic_json_request(model, &request, &model_config, &defaults)?
+            }
+            crate::model::ToolCallingMode::Native | crate::model::ToolCallingMode::Disabled => {
+                build_chat_request(model, &request, &model_config, &defaults)?
+            }
+        };
+        let json_retry_body = if uses_tools
+            && mode == crate::model::ToolCallingMode::Native
+            && semantic_retry_mode(&model_config, mode) == Some(crate::model::ToolCallingMode::Json)
+        {
+            let mut retry_request = request.clone();
+            retry_request.stream = false;
+            Some(build_generic_json_request(
+                model,
+                &retry_request,
+                &model_config,
+                &defaults,
+            )?)
+        } else {
+            None
+        };
+        let lease = self.acquire_managed_llama_server(model.as_str()).await?;
+        self.managed_context_plan(
+            &lease,
+            &body,
+            request.max_output_tokens,
+            model_config.n_ctx.unwrap_or(self.config.n_ctx),
+        )
+        .await?;
+        let first_timeout = std::time::Duration::from_secs(self.config.first_token_timeout_secs);
+        let idle_timeout = std::time::Duration::from_secs(self.config.stream_idle_timeout_secs);
+        let generation_timeout =
+            std::time::Duration::from_secs(self.config.generation_timeout_secs);
+        let upstream = tokio::time::timeout(first_timeout, self.send_managed_chat(&lease, &body))
+            .await
+            .map_err(|_| crate::error::HoshikageError::UpstreamTimeout)??;
+        if !upstream.status().is_success() {
+            return Err(crate::error::HoshikageError::InferenceError(format!(
+                "llama-server returned HTTP {}",
+                upstream.status()
+            )));
+        }
+        let tool_config = model_config.tool_calling.clone();
+        let validation_request = request.clone();
+        let retry_client = self.llama_server_client.clone();
+        let retry_endpoint = lease.endpoint().clone();
+        let retry_model_config = model_config.clone();
+        let retry_limits = BufferedRetryLimits {
+            context_window: model_config.n_ctx.unwrap_or(self.config.n_ctx),
+            first_timeout,
+            generation_timeout,
+        };
+        let stream = async_stream::try_stream! {
+            let mut lease = Some(lease);
+            let mut upstream = upstream.bytes_stream();
+            let mut sse = LlamaServerSseDecoder::default();
+            let started_at = tokio::time::Instant::now();
+            let mut first_chunk = true;
+
+            match mode {
+                crate::model::ToolCallingMode::Native
+                | crate::model::ToolCallingMode::Disabled => {
+                    let mut strategy = NativeStreamStrategy::new(
+                        request.tools.clone(),
+                        request.tool_choice.clone(),
+                        tool_config.strict,
+                        tool_config.max_argument_bytes,
+                    );
+                    let mut attempt_buffer = NativeAttemptBuffer::default();
+                    let mut retry_error = None;
+                    'native_stream: loop {
+                        let elapsed = started_at.elapsed();
+                        if elapsed >= generation_timeout {
+                            Err(crate::error::HoshikageError::UpstreamTimeout)?;
+                        }
+                        let per_chunk = if first_chunk { first_timeout } else { idle_timeout };
+                        let remaining = generation_timeout.saturating_sub(elapsed);
+                        let timeout = per_chunk.min(remaining);
+                        let next = tokio::time::timeout(timeout, upstream.next())
+                            .await
+                            .map_err(|_| crate::error::HoshikageError::UpstreamTimeout)?;
+                        let Some(chunk) = next else { break };
+                        let chunk = chunk
+                            .map_err(|_| crate::error::HoshikageError::UpstreamDisconnected)?;
+                        first_chunk = false;
+                        let deltas = match sse.push(&chunk) {
+                            Ok(deltas) => deltas,
+                            Err(error)
+                                if should_retry_stream_semantic_error(
+                                    &error,
+                                    false,
+                                    &retry_model_config,
+                                    mode,
+                                ) =>
+                            {
+                                retry_error = Some(error);
+                                break 'native_stream;
+                            }
+                            Err(error) => Err(error)?,
+                        };
+                        for delta in deltas {
+                            let actions = match strategy.push(delta) {
+                                Ok(actions) => actions,
+                                Err(error)
+                                    if should_retry_stream_semantic_error(
+                                        &error,
+                                        false,
+                                        &retry_model_config,
+                                        mode,
+                                    ) =>
+                                {
+                                    retry_error = Some(error);
+                                    break 'native_stream;
+                                }
+                                Err(error) => Err(error)?,
+                            };
+                            attempt_buffer.hold(actions);
+                        }
+                    }
+                    if let Some(error) = retry_error {
+                        drop(upstream);
+                        tracing::warn!(
+                            primary_mode = ?mode,
+                            retry_mode = ?crate::model::ToolCallingMode::Json,
+                            error_class = %error,
+                            "Retrying stream Tool generation before output began"
+                        );
+                        let retry_body = json_retry_body.as_ref().ok_or(error)?;
+                        let completion = execute_buffered_json_stream_retry(
+                            &retry_client,
+                            &retry_endpoint,
+                            retry_body,
+                            &validation_request,
+                            &retry_model_config,
+                            retry_limits,
+                        )
+                        .await?;
+                        for action in buffered_completion_actions(completion) {
+                            yield action;
+                        }
+                    } else {
+                        sse.finish()?;
+                        let completion = strategy.finish()?;
+                        for action in attempt_buffer.commit(completion) {
+                            yield action;
+                        }
+                    }
+                }
+                crate::model::ToolCallingMode::Json => {
+                    let mut content = String::new();
+                    let mut usage = None;
+                    let mut finish_reason = None;
+                    loop {
+                        let elapsed = started_at.elapsed();
+                        if elapsed >= generation_timeout {
+                            Err(crate::error::HoshikageError::UpstreamTimeout)?;
+                        }
+                        let per_chunk = if first_chunk { first_timeout } else { idle_timeout };
+                        let remaining = generation_timeout.saturating_sub(elapsed);
+                        let timeout = per_chunk.min(remaining);
+                        let next = tokio::time::timeout(timeout, upstream.next())
+                            .await
+                            .map_err(|_| crate::error::HoshikageError::UpstreamTimeout)?;
+                        let Some(chunk) = next else { break };
+                        let chunk = chunk
+                            .map_err(|_| crate::error::HoshikageError::UpstreamDisconnected)?;
+                        first_chunk = false;
+                        for delta in sse.push(&chunk)? {
+                            match delta {
+                                ModelDelta::Text(fragment) => content.push_str(&fragment),
+                                ModelDelta::Usage(measured) => usage = Some(measured),
+                                ModelDelta::Finished(reason) => finish_reason = Some(reason),
+                                ModelDelta::ToolCallStarted { .. }
+                                | ModelDelta::ToolName(_)
+                                | ModelDelta::ToolArguments(_)
+                                | ModelDelta::ToolCallFinished => {
+                                    Err(crate::error::HoshikageError::ResponseTranslationFailed)?;
+                                }
+                            }
+                        }
+                    }
+                    let measured = sse.finish()?;
+                    let usage = usage.unwrap_or(measured);
+                    if finish_reason != Some(ModelFinishReason::Stop) {
+                        Err(crate::error::HoshikageError::ResponseTranslationFailed)?;
+                    }
+                    let completion = parse_generic_json_completion(
+                        ModelCompletion::Text { content, usage },
+                        tool_config.repair_invalid_json,
+                    )?;
+                    let completion = validate_native_completion(
+                        completion,
+                        &validation_request,
+                        &model_config,
+                    )?;
+                    for action in buffered_completion_actions(completion) {
+                        yield action;
+                    }
+                }
+            }
+            if let Some(lease) = lease.take() {
+                lease
+                    .finish()
+                    .map_err(|error| crate::error::HoshikageError::Other(error.to_string()))?;
+            }
+        };
+        Ok(Box::pin(stream))
+    }
+
+    async fn execute_managed_completion(
+        &self,
+        model: &crate::conversation::ModelId,
+        lease: &RuntimeLease,
+        body: &serde_json::Value,
+        mode: crate::model::ToolCallingMode,
+        request: &ModelRequest,
+        model_config: &ModelConfig,
+    ) -> Result<ModelCompletion> {
+        let plan = self
+            .managed_context_plan(
+                lease,
+                body,
+                request.max_output_tokens,
+                model_config.n_ctx.unwrap_or(self.config.n_ctx),
+            )
+            .await?;
+        tracing::debug!(
+            model = model.as_str(),
+            input_tokens = plan.input_tokens,
+            reserved_output_tokens = plan.reserved_output_tokens,
+            context_window = plan.context_window,
+            accuracy = ?plan.accuracy,
+            "Validated Responses context plan"
+        );
+        let upstream = match self.send_managed_chat(lease, body).await {
+            Ok(response) => response,
+            Err(error) => {
+                self.mark_managed_lease_unhealthy(
+                    model.as_str(),
+                    lease,
+                    format!("Responses upstream request failed: {error}"),
+                );
+                return Err(error.into());
+            }
+        };
+        if !upstream.status().is_success() {
+            return Err(crate::error::HoshikageError::InferenceError(format!(
+                "llama-server returned HTTP {}",
+                upstream.status()
+            )));
+        }
+        let bytes = match upstream.bytes().await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.mark_managed_lease_unhealthy(
+                    model.as_str(),
+                    lease,
+                    format!("Responses upstream body failed: {error}"),
+                );
+                return Err(error.into());
+            }
+        };
+        let completion = parse_chat_response(&bytes)?;
+        let completion = match mode {
+            crate::model::ToolCallingMode::Json => parse_generic_json_completion(
+                completion,
+                model_config.tool_calling.repair_invalid_json,
+            )?,
+            crate::model::ToolCallingMode::Native | crate::model::ToolCallingMode::Disabled => {
+                completion
+            }
+        };
+        validate_native_completion(completion, request, model_config)
+    }
+
+    async fn managed_context_plan(
+        &self,
+        lease: &RuntimeLease,
+        body: &serde_json::Value,
+        reserved_output_tokens: u32,
+        context_window: u32,
+    ) -> Result<ContextPlan> {
+        #[derive(Deserialize)]
+        struct InputTokensResponse {
+            input_tokens: u32,
+        }
+
+        let request_bytes = serde_json::to_vec(body)?.len();
+        let response = self
+            .llama_server_client
+            .chat_input_tokens(lease.endpoint(), body)
+            .await;
+        let plan = match response {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<InputTokensResponse>().await {
+                    Ok(decoded) => ContextPlan {
+                        input_tokens: decoded.input_tokens,
+                        reserved_output_tokens,
+                        context_window,
+                        accuracy: ContextAccuracy::Exact,
+                    },
+                    Err(_) => {
+                        tracing::warn!(
+                            "llama-server input token response was invalid; using conservative context plan"
+                        );
+                        ContextPlan::conservative_from_request_bytes(
+                            request_bytes,
+                            reserved_output_tokens,
+                            context_window,
+                        )
+                    }
+                }
+            }
+            Ok(response) => {
+                tracing::warn!(
+                    status = %response.status(),
+                    "llama-server input token endpoint unavailable; using conservative context plan"
+                );
+                ContextPlan::conservative_from_request_bytes(
+                    request_bytes,
+                    reserved_output_tokens,
+                    context_window,
+                )
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_class = if error.is_timeout() {
+                        "timeout"
+                    } else {
+                        "transport"
+                    },
+                    "llama-server input token endpoint failed; using conservative context plan"
+                );
+                ContextPlan::conservative_from_request_bytes(
+                    request_bytes,
+                    reserved_output_tokens,
+                    context_window,
+                )
+            }
+        };
+        plan.validate()
+    }
+
     pub async fn build_prompt(
         &self,
         model_name: &str,
-        messages: &[crate::api::ChatMessage],
+        messages: &[crate::conversation::Message],
     ) -> Result<String> {
         let model_config = self.get_model(model_name).await?;
         let mut state = self
@@ -1252,6 +2192,8 @@ impl ModelManager {
             alias: model_name.to_string(),
             log_file: Some(log_file),
             sleep_idle_secs: self.config.llama_server_sleep_idle_secs,
+            cache_type_k: self.config.llama_server_cache_type_k,
+            cache_type_v: self.config.llama_server_cache_type_v,
             request: request.clone(),
         };
         let command_spec = LlamaServerCommandSpec::from_launch_config(&launch);
@@ -1275,6 +2217,8 @@ impl ModelManager {
             main = %loaded_info.main_model.display(),
             n_ctx = loaded_info.n_ctx,
             n_gpu_layers = loaded_info.n_gpu_layers,
+            cache_type_k = ?self.config.llama_server_cache_type_k,
+            cache_type_v = ?self.config.llama_server_cache_type_v,
             mmproj = loaded_info.mmproj.as_ref().map(|path| path.display().to_string()),
             draft_model = loaded_info.draft_model.as_ref().map(|path| path.display().to_string()),
             speculation_mode = ?loaded_info.speculation_mode,
@@ -1338,6 +2282,26 @@ impl ModelManager {
         state.managed_server = None;
         state.managed_loaded_info = None;
         state.current_model = None;
+    }
+
+    pub fn mark_managed_lease_unhealthy(
+        &self,
+        model_name: &str,
+        lease: &RuntimeLease,
+        reason: impl Into<String>,
+    ) {
+        self.mark_managed_server_unhealthy(model_name);
+        if let Err(error) = self
+            .managed_runtime
+            .mark_unhealthy(lease.generation(), reason)
+        {
+            tracing::error!(
+                model = model_name,
+                generation = lease.generation().value(),
+                error = %error,
+                "Failed to mark managed runtime generation unhealthy"
+            );
+        }
     }
 
     fn stop_loaded_runtime(&self, state: &mut InferenceState) {

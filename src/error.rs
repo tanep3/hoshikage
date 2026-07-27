@@ -29,6 +29,39 @@ pub enum HoshikageError {
     #[error("HTTPエラー: {0}")]
     HttpError(#[from] reqwest::Error),
 
+    #[error("server is busy")]
+    ServerBusy,
+
+    #[error("response translation failed")]
+    ResponseTranslationFailed,
+
+    #[error("generation failed")]
+    GenerationFailed,
+
+    #[error("upstream disconnected")]
+    UpstreamDisconnected,
+
+    #[error("upstream timed out")]
+    UpstreamTimeout,
+
+    #[error("context length exceeded")]
+    ContextLengthExceeded,
+
+    #[error("model does not support tool calling")]
+    ToolCallingNotSupported,
+
+    #[error("tool schema is invalid")]
+    InvalidToolSchema,
+
+    #[error("tool arguments are invalid")]
+    InvalidToolArguments,
+
+    #[error("model violated tool choice")]
+    ToolChoiceViolation,
+
+    #[error("model generated multiple tool calls")]
+    MultipleToolCalls,
+
     #[error("文字列エラー: {0}")]
     StringError(#[from] NulError),
 

@@ -1,9 +1,15 @@
 use clap::{Parser, Subcommand};
 use hoshikage::api;
-use hoshikage::commands::{add_model, doctor, list_models, remove_model};
+use hoshikage::codex::CodexProfileMode;
+use hoshikage::commands::{
+    add_model, codex_config, codex_model_catalog, create_token, doctor, list_models, list_tokens,
+    remove_model, revoke_token, rotate_token, AddModelOptions,
+};
 use hoshikage::config::Config;
 use hoshikage::error::HoshikageError;
+use hoshikage::i18n::Language;
 use hoshikage::model::ModelManager;
+#[cfg(unix)]
 use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
@@ -16,8 +22,11 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    #[arg(short, long, default_value_t = 3030)]
-    port: u16,
+    #[arg(short, long)]
+    port: Option<u16>,
+
+    #[arg(long, value_enum, global = true)]
+    language: Option<LanguageArg>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -57,12 +66,91 @@ enum Commands {
         model: Option<String>,
         #[arg(long)]
         json: bool,
+        #[arg(long, value_name = "URL", requires = "model")]
+        codex_base_url: Option<String>,
+    },
+    CodexConfig {
+        #[arg(long, value_name = "MODEL_ID")]
+        model: String,
+        #[arg(long, value_enum, default_value_t = ProfileModeArg::Interactive)]
+        mode: ProfileModeArg,
+        #[arg(long, default_value = "http://127.0.0.1:3030/v1", value_name = "URL")]
+        base_url: String,
+        #[arg(long)]
+        authenticated: bool,
+    },
+    CodexModelCatalog {
+        #[arg(long)]
+        json: bool,
+    },
+    Token {
+        #[command(subcommand)]
+        command: TokenCommands,
+    },
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, Default)]
+enum ProfileModeArg {
+    #[default]
+    Interactive,
+    Unattended,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+enum LanguageArg {
+    En,
+    Ja,
+}
+
+impl From<LanguageArg> for Language {
+    fn from(value: LanguageArg) -> Self {
+        match value {
+            LanguageArg::En => Self::En,
+            LanguageArg::Ja => Self::Ja,
+        }
+    }
+}
+
+impl From<ProfileModeArg> for CodexProfileMode {
+    fn from(value: ProfileModeArg) -> Self {
+        match value {
+            ProfileModeArg::Interactive => Self::Interactive,
+            ProfileModeArg::Unattended => Self::Unattended,
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+enum TokenCommands {
+    Create {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    List,
+    Rotate {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    Revoke {
+        #[arg(value_name = "NAME")]
+        name: String,
     },
 }
 
 #[tokio::main]
 async fn main() -> hoshikage::Result<()> {
     let cli = Cli::parse();
+    let command_port = cli.port.unwrap_or(3030);
+    let config = Config::load()?;
+    let language = Language::resolve(
+        cli.language.map(Into::into),
+        std::env::var("HOSHIKAGE_LANG").ok().as_deref(),
+        std::env::var("LC_ALL")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .or_else(|| std::env::var("LANG").ok())
+            .as_deref(),
+    );
 
     if let Some(command) = cli.command {
         match command {
@@ -78,9 +166,8 @@ async fn main() -> hoshikage::Result<()> {
                 check,
                 stop_words,
             } => {
-                add_model(
+                add_model(AddModelOptions {
                     path,
-                    label,
                     stop_words,
                     mmproj,
                     mtp_drafter,
@@ -89,24 +176,45 @@ async fn main() -> hoshikage::Result<()> {
                     n_ctx,
                     n_gpu_layers,
                     check,
-                    cli.port,
-                )
+                    label,
+                    port: command_port,
+                    language,
+                })
                 .await?;
             }
             Commands::Rm { label } => {
-                remove_model(label, cli.port).await?;
+                remove_model(label, command_port, language).await?;
             }
             Commands::List { details } => {
-                list_models(cli.port, details).await?;
+                list_models(command_port, details, language).await?;
             }
-            Commands::Doctor { model, json } => {
-                doctor(model, json).await?;
+            Commands::Doctor {
+                model,
+                json,
+                codex_base_url,
+            } => {
+                doctor(model, json, codex_base_url, language).await?;
             }
+            Commands::CodexConfig {
+                model,
+                mode,
+                base_url,
+                authenticated,
+            } => {
+                codex_config(model, mode.into(), base_url, authenticated).await?;
+            }
+            Commands::CodexModelCatalog { json } => {
+                codex_model_catalog(json, language).await?;
+            }
+            Commands::Token { command } => match command {
+                TokenCommands::Create { name } => create_token(name).await?,
+                TokenCommands::List => list_tokens(language).await?,
+                TokenCommands::Rotate { name } => rotate_token(name).await?,
+                TokenCommands::Revoke { name } => revoke_token(name, language).await?,
+            },
         }
         return Ok(());
     }
-
-    let config = Config::load()?;
 
     let mut _log_guard = None;
     let mut _stderr_guard = None;
@@ -147,11 +255,19 @@ async fn main() -> hoshikage::Result<()> {
     // タイムアウト監視タスクを開始 (IDLE_TIMEOUT: VRAMオフロード, GREAT_TIMEOUT: RAMディスク解放)
     manager.clone().start_idle_monitor();
 
-    let app = api::create_router(manager);
+    let auth_policy = hoshikage::security::AuthPolicy::for_bind_host(&config.host);
+    let token_store = Arc::new(hoshikage::security::FileTokenStore::new(
+        config.auth_token_path()?,
+    ));
+    let auth_state = hoshikage::security::AuthState::validated(auth_policy, token_store)
+        .await
+        .map_err(|error| HoshikageError::ConfigError(error.to_string()))?;
+    let app = api::create_router_with_auth(manager, auth_state);
 
-    let listener = tokio::net::TcpListener::bind(format!("{}:{}", config.host, cli.port)).await?;
+    let port = cli.port.unwrap_or(config.port);
+    let listener = tokio::net::TcpListener::bind(format!("{}:{}", config.host, port)).await?;
 
-    tracing::info!("Hoshikage server starting on {}:{}", config.host, cli.port);
+    tracing::info!("Hoshikage server starting on {}:{}", config.host, port);
 
     axum::serve(listener, app).await?;
 
@@ -174,14 +290,14 @@ fn resolve_log_path(log_file_path: &str) -> (std::path::PathBuf, String) {
 }
 
 fn redirect_stderr_to_daily_file(
-    log_dir: &std::path::Path,
-    file_prefix: &str,
+    _log_dir: &std::path::Path,
+    _file_prefix: &str,
 ) -> hoshikage::Result<Option<std::fs::File>> {
     #[cfg(unix)]
     {
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let file_name = format!("{}.{}", file_prefix, date);
-        let file_path = log_dir.join(file_name);
+        let file_name = format!("{}.{}", _file_prefix, date);
+        let file_path = _log_dir.join(file_name);
 
         let file = OpenOptions::new()
             .create(true)

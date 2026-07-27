@@ -1,10 +1,30 @@
 use crate::error::Result;
 use std::path::PathBuf;
+use std::str::FromStr;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnknownFieldPolicy {
+    Compatible,
+    Strict,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeBackendKind {
     LlamaServerManaged,
     LlamaFfi,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvCacheType {
+    F32,
+    F16,
+    Bf16,
+    Q8Zero,
+    Q4Zero,
+    Q4One,
+    Iq4Nl,
+    Q5Zero,
+    Q5One,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +50,23 @@ pub struct Config {
     pub llama_server_port: u16,
     pub llama_server_startup_timeout_secs: u64,
     pub llama_server_sleep_idle_secs: Option<u64>,
+    pub llama_server_cache_type_k: Option<KvCacheType>,
+    pub llama_server_cache_type_v: Option<KvCacheType>,
+    pub responses_unknown_field_policy: UnknownFieldPolicy,
+    pub max_request_bytes: usize,
+    pub max_tool_schema_bytes: usize,
+    pub max_single_tool_schema_bytes: usize,
+    pub max_tools: usize,
+    pub max_tool_argument_bytes: usize,
+    pub max_tool_result_bytes: usize,
+    pub responses_queue_capacity: usize,
+    pub responses_queue_timeout_ms: u64,
+    pub responses_timeout_secs: u64,
+    pub first_token_timeout_secs: u64,
+    pub stream_idle_timeout_secs: u64,
+    pub generation_timeout_secs: u64,
+    pub auth_token_file: Option<PathBuf>,
+    pub debug_capture: bool,
     pub lib_path: Option<String>,
     // Diffusion parameters
     pub diffusion_steps: i32,
@@ -63,6 +100,23 @@ impl Default for Config {
             llama_server_port: 13030,
             llama_server_startup_timeout_secs: 120,
             llama_server_sleep_idle_secs: None,
+            llama_server_cache_type_k: None,
+            llama_server_cache_type_v: None,
+            responses_unknown_field_policy: UnknownFieldPolicy::Compatible,
+            max_request_bytes: 8_388_608,
+            max_tool_schema_bytes: 1_048_576,
+            max_single_tool_schema_bytes: 262_144,
+            max_tools: 128,
+            max_tool_argument_bytes: 65_536,
+            max_tool_result_bytes: 4_194_304,
+            responses_queue_capacity: 4,
+            responses_queue_timeout_ms: 30_000,
+            responses_timeout_secs: 900,
+            first_token_timeout_secs: 120,
+            stream_idle_timeout_secs: 120,
+            generation_timeout_secs: 600,
+            auth_token_file: None,
+            debug_capture: false,
             lib_path: None,
             // Diffusion defaults
             diffusion_steps: 50,
@@ -79,7 +133,7 @@ impl Config {
         let mut config = Self::default();
 
         if let Ok(env_path) = std::env::var("HOSHIKAGE_CONFIG_PATH") {
-            dotenvy::from_path(&env_path).ok();
+            load_dotenv(&PathBuf::from(env_path))?;
         }
 
         let mut config_dir = dirs::config_dir().ok_or_else(|| {
@@ -90,11 +144,11 @@ impl Config {
 
         let env_path = config_dir.join(".env");
         if env_path.exists() {
-            dotenvy::from_path(&env_path).ok();
+            load_dotenv(&env_path)?;
         }
 
-        if let Ok(port) = std::env::var("PORT") {
-            config.port = port.parse().unwrap_or(3030);
+        if let Some(port) = parse_env("PORT")? {
+            config.port = port;
         }
 
         if let Ok(host) = std::env::var("HOST") {
@@ -109,12 +163,12 @@ impl Config {
             config.log_file_path = Some(log_file);
         }
 
-        if let Ok(idle_timeout) = std::env::var("IDLE_TIMEOUT") {
-            config.idle_timeout = idle_timeout.parse().unwrap_or(300);
+        if let Some(idle_timeout) = parse_env("IDLE_TIMEOUT")? {
+            config.idle_timeout = idle_timeout;
         }
 
-        if let Ok(great_timeout) = std::env::var("GREAT_TIMEOUT") {
-            config.great_timeout = great_timeout.parse().unwrap_or(60);
+        if let Some(great_timeout) = parse_env("GREAT_TIMEOUT")? {
+            config.great_timeout = great_timeout;
         }
 
         if let Ok(ramdisk_path) = std::env::var("RAMDISK_PATH") {
@@ -125,28 +179,28 @@ impl Config {
             };
         }
 
-        if let Ok(n_gpu_layers) = std::env::var("N_GPU_LAYERS") {
-            config.n_gpu_layers = n_gpu_layers.parse().unwrap_or(-1);
+        if let Some(n_gpu_layers) = parse_env("N_GPU_LAYERS")? {
+            config.n_gpu_layers = n_gpu_layers;
         }
 
-        if let Ok(n_ctx) = std::env::var("N_CTX") {
-            config.n_ctx = n_ctx.parse().unwrap_or(4096);
+        if let Some(n_ctx) = parse_env("N_CTX")? {
+            config.n_ctx = n_ctx;
         }
 
-        if let Ok(temperature) = std::env::var("TEMPERATURE") {
-            config.default_temperature = temperature.parse().unwrap_or(0.2);
+        if let Some(temperature) = parse_env("TEMPERATURE")? {
+            config.default_temperature = temperature;
         }
 
-        if let Ok(top_p) = std::env::var("TOP_P") {
-            config.default_top_p = top_p.parse().unwrap_or(0.8);
+        if let Some(top_p) = parse_env("TOP_P")? {
+            config.default_top_p = top_p;
         }
 
-        if let Ok(repeat_penalty) = std::env::var("REPEAT_PENALTY") {
-            config.repeat_penalty = repeat_penalty.parse().unwrap_or(1.1);
+        if let Some(repeat_penalty) = parse_env("REPEAT_PENALTY")? {
+            config.repeat_penalty = repeat_penalty;
         }
 
-        if let Ok(repeat_last_n) = std::env::var("REPEAT_LAST_N") {
-            config.repeat_last_n = repeat_last_n.parse().unwrap_or(64);
+        if let Some(repeat_last_n) = parse_env("REPEAT_LAST_N")? {
+            config.repeat_last_n = repeat_last_n;
         }
 
         if let Ok(model_dir) = std::env::var("MODEL_DIR") {
@@ -169,46 +223,126 @@ impl Config {
             config.llama_server_host = host;
         }
 
-        if let Ok(port) = std::env::var("HOSHIKAGE_LLAMA_SERVER_PORT") {
-            config.llama_server_port = port.parse().unwrap_or(13030);
+        if let Some(port) = parse_env("HOSHIKAGE_LLAMA_SERVER_PORT")? {
+            config.llama_server_port = port;
         }
 
-        if let Ok(timeout) = std::env::var("HOSHIKAGE_LLAMA_SERVER_STARTUP_TIMEOUT_SECS") {
-            config.llama_server_startup_timeout_secs = timeout.parse().unwrap_or(120);
+        if let Some(timeout) = parse_env("HOSHIKAGE_LLAMA_SERVER_STARTUP_TIMEOUT_SECS")? {
+            config.llama_server_startup_timeout_secs = timeout;
         }
 
         if let Ok(sleep_idle) = std::env::var("HOSHIKAGE_LLAMA_SERVER_SLEEP_IDLE_SECS") {
             config.llama_server_sleep_idle_secs = match sleep_idle.as_str() {
                 "" | "off" | "disabled" => None,
-                value => Some(value.parse().unwrap_or(2)),
+                value => Some(parse_value(
+                    "HOSHIKAGE_LLAMA_SERVER_SLEEP_IDLE_SECS",
+                    value,
+                )?),
             };
         }
+        if let Ok(cache_type) = std::env::var("HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_K") {
+            config.llama_server_cache_type_k =
+                KvCacheType::parse_optional("HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_K", &cache_type)?;
+        }
+        if let Ok(cache_type) = std::env::var("HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_V") {
+            config.llama_server_cache_type_v =
+                KvCacheType::parse_optional("HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_V", &cache_type)?;
+        }
+
+        if let Ok(policy) = std::env::var("RESPONSES_UNKNOWN_FIELD_POLICY") {
+            config.responses_unknown_field_policy = UnknownFieldPolicy::parse(&policy)?;
+        }
+        apply_responses_environment(&mut config)?;
 
         if let Ok(lib_path) = std::env::var("HOSHIKAGE_LIB_PATH") {
             config.lib_path = Some(lib_path);
         }
 
-        if let Ok(diffusion_steps) = std::env::var("DIFFUSION_STEPS") {
-            config.diffusion_steps = diffusion_steps.parse().unwrap_or(50);
+        if let Some(diffusion_steps) = parse_env("DIFFUSION_STEPS")? {
+            config.diffusion_steps = diffusion_steps;
         }
 
-        if let Ok(diffusion_algorithm) = std::env::var("DIFFUSION_ALGORITHM") {
-            config.diffusion_algorithm = diffusion_algorithm.parse().unwrap_or(4);
+        if let Some(diffusion_algorithm) = parse_env("DIFFUSION_ALGORITHM")? {
+            config.diffusion_algorithm = diffusion_algorithm;
         }
 
-        if let Ok(diffusion_schedule) = std::env::var("DIFFUSION_SCHEDULE") {
-            config.diffusion_schedule = diffusion_schedule.parse().unwrap_or(0);
+        if let Some(diffusion_schedule) = parse_env("DIFFUSION_SCHEDULE")? {
+            config.diffusion_schedule = diffusion_schedule;
         }
 
-        if let Ok(diffusion_cfg_scale) = std::env::var("DIFFUSION_CFG_SCALE") {
-            config.diffusion_cfg_scale = diffusion_cfg_scale.parse().unwrap_or(0.0);
+        if let Some(diffusion_cfg_scale) = parse_env("DIFFUSION_CFG_SCALE")? {
+            config.diffusion_cfg_scale = diffusion_cfg_scale;
         }
 
-        if let Ok(diffusion_max_tokens) = std::env::var("DIFFUSION_MAX_TOKENS") {
-            config.diffusion_max_tokens = diffusion_max_tokens.parse().unwrap_or(0);
+        if let Some(diffusion_max_tokens) = parse_env("DIFFUSION_MAX_TOKENS")? {
+            config.diffusion_max_tokens = diffusion_max_tokens;
         }
 
+        config.validate()?;
         Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.max_request_bytes == 0
+            || self.max_tool_schema_bytes == 0
+            || self.max_single_tool_schema_bytes == 0
+            || self.max_tools == 0
+            || self.max_tool_argument_bytes == 0
+            || self.max_tool_result_bytes == 0
+            || self.responses_queue_capacity == 0
+        {
+            return Err(crate::error::HoshikageError::ConfigError(
+                "Responses size and queue limits must be greater than zero".to_string(),
+            ));
+        }
+        if self.max_single_tool_schema_bytes > self.max_tool_schema_bytes {
+            return Err(crate::error::HoshikageError::ConfigError(
+                "single Tool Schema limit exceeds total Tool Schema limit".to_string(),
+            ));
+        }
+        if self.max_tool_result_bytes > self.max_request_bytes {
+            return Err(crate::error::HoshikageError::ConfigError(
+                "Tool Result limit exceeds request body limit".to_string(),
+            ));
+        }
+        if self
+            .auth_token_file
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(crate::error::HoshikageError::ConfigError(
+                "HOSHIKAGE_AUTH_TOKEN_FILE must not be empty".to_string(),
+            ));
+        }
+        for (name, value) in [
+            (
+                "HOSHIKAGE_RESPONSES_QUEUE_TIMEOUT_MS",
+                self.responses_queue_timeout_ms,
+            ),
+            (
+                "HOSHIKAGE_RESPONSES_TIMEOUT_SECS",
+                self.responses_timeout_secs,
+            ),
+            (
+                "HOSHIKAGE_FIRST_TOKEN_TIMEOUT_SECS",
+                self.first_token_timeout_secs,
+            ),
+            (
+                "HOSHIKAGE_STREAM_IDLE_TIMEOUT_SECS",
+                self.stream_idle_timeout_secs,
+            ),
+            (
+                "HOSHIKAGE_GENERATION_TIMEOUT_SECS",
+                self.generation_timeout_secs,
+            ),
+        ] {
+            if value == 0 {
+                return Err(crate::error::HoshikageError::ConfigError(format!(
+                    "{name} must be greater than zero"
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn model_map_path(&self) -> Result<PathBuf> {
@@ -236,6 +370,23 @@ impl Config {
         })?;
 
         Ok(config_dir.join("hoshikage").join("llama.cpp"))
+    }
+
+    pub fn auth_token_path(&self) -> Result<PathBuf> {
+        if let Some(path) = &self.auth_token_file {
+            return Ok(path.clone());
+        }
+        let config_dir = dirs::config_dir().ok_or_else(|| {
+            crate::error::HoshikageError::ConfigError("Config directory not found".to_string())
+        })?;
+        Ok(config_dir.join("hoshikage").join("auth_tokens.json"))
+    }
+
+    pub fn debug_capture_path(&self) -> Result<PathBuf> {
+        let config_dir = dirs::config_dir().ok_or_else(|| {
+            crate::error::HoshikageError::ConfigError("Config directory not found".to_string())
+        })?;
+        Ok(config_dir.join("hoshikage").join("debug-capture"))
     }
 
     pub fn resolve_lib_path(&self) -> Result<PathBuf> {
@@ -276,5 +427,193 @@ impl RuntimeBackendKind {
                 other
             ))),
         }
+    }
+}
+
+impl KvCacheType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::F16 => "f16",
+            Self::Bf16 => "bf16",
+            Self::Q8Zero => "q8_0",
+            Self::Q4Zero => "q4_0",
+            Self::Q4One => "q4_1",
+            Self::Iq4Nl => "iq4_nl",
+            Self::Q5Zero => "q5_0",
+            Self::Q5One => "q5_1",
+        }
+    }
+
+    fn parse_optional(key: &str, value: &str) -> Result<Option<Self>> {
+        match value {
+            "" | "default" | "off" => Ok(None),
+            "f32" => Ok(Some(Self::F32)),
+            "f16" => Ok(Some(Self::F16)),
+            "bf16" => Ok(Some(Self::Bf16)),
+            "q8_0" => Ok(Some(Self::Q8Zero)),
+            "q4_0" => Ok(Some(Self::Q4Zero)),
+            "q4_1" => Ok(Some(Self::Q4One)),
+            "iq4_nl" => Ok(Some(Self::Iq4Nl)),
+            "q5_0" => Ok(Some(Self::Q5Zero)),
+            "q5_1" => Ok(Some(Self::Q5One)),
+            other => Err(crate::error::HoshikageError::ConfigError(format!(
+                "unsupported {key}: {other}"
+            ))),
+        }
+    }
+}
+
+impl UnknownFieldPolicy {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "compatible" => Ok(Self::Compatible),
+            "strict" => Ok(Self::Strict),
+            other => Err(crate::error::HoshikageError::ConfigError(format!(
+                "unsupported RESPONSES_UNKNOWN_FIELD_POLICY: {other}"
+            ))),
+        }
+    }
+}
+
+fn parse_value<T>(key: &str, value: &str) -> Result<T>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    value.parse().map_err(|error| {
+        crate::error::HoshikageError::ConfigError(format!("invalid {key} value {value:?}: {error}"))
+    })
+}
+
+fn load_dotenv(path: &std::path::Path) -> Result<()> {
+    dotenvy::from_path(path).map_err(|error| {
+        crate::error::HoshikageError::ConfigError(format!(
+            "failed to load config file {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(())
+}
+
+fn parse_env<T>(key: &str) -> Result<Option<T>>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    match std::env::var(key) {
+        Ok(value) => parse_value(key, &value).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(crate::error::HoshikageError::ConfigError(format!(
+            "invalid {key}: {error}"
+        ))),
+    }
+}
+
+fn apply_responses_environment(config: &mut Config) -> Result<()> {
+    macro_rules! apply {
+        ($key:literal, $field:ident) => {
+            if let Some(value) = parse_env($key)? {
+                config.$field = value;
+            }
+        };
+    }
+    apply!("HOSHIKAGE_MAX_REQUEST_BYTES", max_request_bytes);
+    apply!("HOSHIKAGE_MAX_TOOL_SCHEMA_BYTES", max_tool_schema_bytes);
+    apply!(
+        "HOSHIKAGE_MAX_SINGLE_TOOL_SCHEMA_BYTES",
+        max_single_tool_schema_bytes
+    );
+    apply!("HOSHIKAGE_MAX_TOOLS", max_tools);
+    apply!("HOSHIKAGE_MAX_TOOL_ARGUMENT_BYTES", max_tool_argument_bytes);
+    apply!("HOSHIKAGE_MAX_TOOL_RESULT_BYTES", max_tool_result_bytes);
+    apply!(
+        "HOSHIKAGE_RESPONSES_QUEUE_CAPACITY",
+        responses_queue_capacity
+    );
+    apply!(
+        "HOSHIKAGE_RESPONSES_QUEUE_TIMEOUT_MS",
+        responses_queue_timeout_ms
+    );
+    apply!("HOSHIKAGE_RESPONSES_TIMEOUT_SECS", responses_timeout_secs);
+    apply!(
+        "HOSHIKAGE_FIRST_TOKEN_TIMEOUT_SECS",
+        first_token_timeout_secs
+    );
+    apply!(
+        "HOSHIKAGE_STREAM_IDLE_TIMEOUT_SECS",
+        stream_idle_timeout_secs
+    );
+    apply!("HOSHIKAGE_GENERATION_TIMEOUT_SECS", generation_timeout_secs);
+    if let Ok(path) = std::env::var("HOSHIKAGE_AUTH_TOKEN_FILE") {
+        config.auth_token_file = Some(PathBuf::from(path));
+    }
+    if let Ok(value) = std::env::var("HOSHIKAGE_DEBUG_CAPTURE") {
+        config.debug_capture = match value.as_str() {
+            "1" | "true" | "on" => true,
+            "0" | "false" | "off" => false,
+            _ => {
+                return Err(crate::error::HoshikageError::ConfigError(format!(
+                    "invalid HOSHIKAGE_DEBUG_CAPTURE value {value:?}"
+                )))
+            }
+        };
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_match_phase_zero_decisions() {
+        let config = Config::default();
+        assert_eq!(config.max_request_bytes, 8_388_608);
+        assert_eq!(config.max_tool_result_bytes, 4_194_304);
+        assert_eq!(config.responses_queue_capacity, 4);
+        assert_eq!(config.responses_queue_timeout_ms, 30_000);
+        assert_eq!(config.responses_timeout_secs, 900);
+        assert_eq!(config.generation_timeout_secs, 600);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn invalid_numeric_values_are_not_silently_defaulted() {
+        let error = parse_value::<u16>("PORT", "not-a-number").unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::HoshikageError::ConfigError(_)
+        ));
+    }
+
+    #[test]
+    fn kv_cache_types_are_validated_and_normalized() {
+        assert_eq!(
+            KvCacheType::parse_optional("CACHE", "q8_0").unwrap(),
+            Some(KvCacheType::Q8Zero)
+        );
+        assert_eq!(
+            KvCacheType::parse_optional("CACHE", "default").unwrap(),
+            None
+        );
+        assert!(KvCacheType::parse_optional("CACHE", "unknown").is_err());
+    }
+
+    #[test]
+    fn cross_field_limits_fail_closed() {
+        let config = Config {
+            max_single_tool_schema_bytes: 2_000,
+            max_tool_schema_bytes: 1_000,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = Config {
+            max_tool_result_bytes: 9_000,
+            max_request_bytes: 8_000,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
     }
 }

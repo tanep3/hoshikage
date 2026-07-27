@@ -1,0 +1,7 @@
+{"type":"response.created","sequence_number":0,"response":{"id":"resp_fixture","object":"response","status":"in_progress","output":[]}}
+{"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_fixture","object":"response","status":"in_progress","output":[]}}
+{"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"fc_fixture","type":"function_call","status":"in_progress","call_id":"call_fixture","name":"exec_command","arguments":""}}
+{"type":"response.function_call_arguments.delta","sequence_number":3,"item_id":"fc_fixture","output_index":0,"delta":"{\"cmd\":\"printf phase0-tool-ok\"}"}
+{"type":"response.function_call_arguments.done","sequence_number":4,"item_id":"fc_fixture","output_index":0,"name":"exec_command","arguments":"{\"cmd\":\"printf phase0-tool-ok\"}"}
+{"type":"response.output_item.done","sequence_number":5,"output_index":0,"item":{"id":"fc_fixture","type":"function_call","status":"completed","call_id":"call_fixture","name":"exec_command","arguments":"{\"cmd\":\"printf phase0-tool-ok\"}"}}
+{"type":"response.completed","sequence_number":6,"response":{"id":"resp_fixture","object":"response","status":"completed","output":[{"id":"fc_fixture","type":"function_call","status":"completed","call_id":"call_fixture","name":"exec_command","arguments":"{\"cmd\":\"printf phase0-tool-ok\"}"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}

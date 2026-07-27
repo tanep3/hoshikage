@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::i18n::Language;
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -18,10 +19,22 @@ struct ModelListResponse {
     pub data: Vec<ModelData>,
 }
 
-async fn list_via_api(port: u16, details: bool) -> Result<()> {
+async fn list_via_api(port: u16, details: bool, language: Language) -> Result<()> {
     if details {
-        println!("Detailed model listing is available when the server is stopped.");
-        println!("The OpenAI-compatible /v1/models API intentionally returns model IDs only.");
+        println!(
+            "{}",
+            language.select(
+                "Detailed model listing is available when the server is stopped.",
+                "詳細なモデル一覧はサーバー停止中に利用できます。"
+            )
+        );
+        println!(
+            "{}",
+            language.select(
+                "The OpenAI-compatible /v1/models API intentionally returns model IDs only.",
+                "OpenAI互換の/v1/models APIは意図的にモデルIDだけを返します。"
+            )
+        );
         println!();
     }
 
@@ -35,18 +48,27 @@ async fn list_via_api(port: u16, details: bool) -> Result<()> {
                 if response.status().is_success() {
                     let resp: ModelListResponse = response.json().await?;
 
-                    println!("Registered models:");
+                    println!(
+                        "{}",
+                        language.select("Registered models:", "登録済みモデル:")
+                    );
                     println!("------------------");
 
                     if resp.data.is_empty() {
-                        println!("No models registered");
+                        println!(
+                            "{}",
+                            language.select("No models registered", "登録モデルはありません")
+                        );
                     } else {
                         for model in &resp.data {
                             println!("  - {}", model.id);
                         }
                     }
                     println!();
-                    println!("Total: {} model(s)", resp.data.len());
+                    match language {
+                        Language::En => println!("Total: {} model(s)", resp.data.len()),
+                        Language::Ja => println!("合計: {}モデル", resp.data.len()),
+                    }
                     return Ok(());
                 }
                 last_error = Some(format!("HTTP {}", response.status()));
@@ -67,7 +89,7 @@ async fn list_via_api(port: u16, details: bool) -> Result<()> {
     )))
 }
 
-fn list_directly(details: bool) -> Result<()> {
+fn list_directly(details: bool, language: Language) -> Result<()> {
     let config_dir = dirs::config_dir().ok_or_else(|| {
         crate::error::HoshikageError::ConfigError("Config directory not found".to_string())
     })?;
@@ -76,7 +98,10 @@ fn list_directly(details: bool) -> Result<()> {
     let model_map_path = hoshikage_dir.join("model_map.json");
 
     if !model_map_path.exists() {
-        println!("No models registered");
+        println!(
+            "{}",
+            language.select("No models registered", "登録モデルはありません")
+        );
         return Ok(());
     }
 
@@ -84,11 +109,17 @@ fn list_directly(details: bool) -> Result<()> {
     let models: std::collections::HashMap<String, crate::model::ModelConfig> =
         serde_json::from_str(&content)?;
 
-    println!("Registered models:");
+    println!(
+        "{}",
+        language.select("Registered models:", "登録済みモデル:")
+    );
     println!("------------------");
 
     if models.is_empty() {
-        println!("No models registered");
+        println!(
+            "{}",
+            language.select("No models registered", "登録モデルはありません")
+        );
     } else {
         for (name, config) in &models {
             if details {
@@ -100,16 +131,19 @@ fn list_directly(details: bool) -> Result<()> {
     }
 
     println!();
-    println!("Total: {} model(s)", models.len());
+    match language {
+        Language::En => println!("Total: {} model(s)", models.len()),
+        Language::Ja => println!("合計: {}モデル", models.len()),
+    }
 
     Ok(())
 }
 
-pub async fn list_models(port: u16, details: bool) -> Result<()> {
+pub async fn list_models(port: u16, details: bool, language: Language) -> Result<()> {
     if check_server_running(port).await {
-        list_via_api(port, details).await
+        list_via_api(port, details, language).await
     } else {
-        list_directly(details)
+        list_directly(details, language)
     }
 }
 

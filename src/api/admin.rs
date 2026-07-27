@@ -1,4 +1,6 @@
-use crate::model::{ModelConfig, SpeculationConfig, SpeculationMode, ThinkingConfig};
+use crate::model::{
+    ModelConfig, SpeculationConfig, SpeculationMode, ThinkingConfig, ToolCallingConfig,
+};
 use axum::{
     extract::{Path, State},
     Json,
@@ -20,6 +22,11 @@ pub struct AddModelRequest {
     pub speculation: SpeculationConfig,
     #[serde(default)]
     pub thinking: ThinkingConfig,
+    #[serde(
+        default,
+        skip_serializing_if = "ToolCallingConfig::is_disabled_default"
+    )]
+    pub tool_calling: ToolCallingConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n_ctx: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,6 +72,7 @@ pub async fn add_model(
         drafter: req.drafter,
         speculation,
         thinking: req.thinking,
+        tool_calling: req.tool_calling,
         n_ctx: req.n_ctx,
         n_gpu_layers: req.n_gpu_layers,
         ..ModelConfig::new_legacy(model_dir, model_file, req.stop)
@@ -144,6 +152,7 @@ mod tests {
             thinking: ThinkingConfig {
                 mode: ThinkingMode::Off,
             },
+            tool_calling: ToolCallingConfig::default(),
             n_ctx: Some(8192),
             n_gpu_layers: Some(-1),
         };

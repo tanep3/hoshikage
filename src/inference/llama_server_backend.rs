@@ -12,6 +12,8 @@ pub struct LlamaServerLaunchConfig {
     pub alias: String,
     pub log_file: Option<PathBuf>,
     pub sleep_idle_secs: Option<u64>,
+    pub cache_type_k: Option<crate::config::KvCacheType>,
+    pub cache_type_v: Option<crate::config::KvCacheType>,
     pub request: LlamaLoadRequest,
 }
 
@@ -83,11 +85,28 @@ impl LlamaServerCommandSpec {
             args.push("--sleep-idle-seconds".to_string());
             args.push(sleep_idle_secs.to_string());
         }
+        append_cache_type(&mut args, "--cache-type-k", config.cache_type_k);
+        append_cache_type(&mut args, "--cache-type-v", config.cache_type_v);
+        if config.request.draft_model.is_some() {
+            append_cache_type(&mut args, "--cache-type-k-draft", config.cache_type_k);
+            append_cache_type(&mut args, "--cache-type-v-draft", config.cache_type_v);
+        }
 
         Self {
             program: config.server_path.clone(),
             args,
         }
+    }
+}
+
+fn append_cache_type(
+    args: &mut Vec<String>,
+    option: &str,
+    cache_type: Option<crate::config::KvCacheType>,
+) {
+    if let Some(cache_type) = cache_type {
+        args.push(option.to_string());
+        args.push(cache_type.as_str().to_string());
     }
 }
 
@@ -170,6 +189,8 @@ mod tests {
             alias: "gemma4".to_string(),
             log_file: None,
             sleep_idle_secs: None,
+            cache_type_k: None,
+            cache_type_v: None,
             request,
         }
     }
@@ -234,6 +255,25 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair == ["--sleep-idle-seconds", "2"]));
+    }
+
+    #[test]
+    fn command_spec_includes_quantized_kv_cache_for_main_and_draft_contexts() {
+        let mut config = launch_config(base_request());
+        config.cache_type_k = Some(crate::config::KvCacheType::Q8Zero);
+        config.cache_type_v = Some(crate::config::KvCacheType::Q4Zero);
+        config.request.draft_model = Some(PathBuf::from("/models/draft.gguf"));
+
+        let spec = LlamaServerCommandSpec::from_launch_config(&config);
+
+        for expected in [
+            ["--cache-type-k", "q8_0"],
+            ["--cache-type-v", "q4_0"],
+            ["--cache-type-k-draft", "q8_0"],
+            ["--cache-type-v-draft", "q4_0"],
+        ] {
+            assert!(spec.args.windows(2).any(|pair| pair == expected));
+        }
     }
 
     #[test]
