@@ -46,6 +46,7 @@ fn responses_service(
             max_tools: manager.max_tools(),
             max_tool_argument_bytes: manager.max_tool_argument_bytes(),
             max_tool_result_bytes: manager.max_tool_result_bytes(),
+            max_image_bytes: (manager.max_request_bytes() / 4).saturating_mul(3),
         },
     );
     if manager.debug_capture_enabled() {

@@ -358,7 +358,7 @@ hoshikage doctor \
   --codex-base-url http://127.0.0.1:3030/v1
 ```
 
-The catalog lists every Bundle with `codex_compatible`, context, Responses, streaming, and tools capabilities. It never exposes model file paths or Tokens.
+The catalog lists every Bundle with `codex_compatible`, context, Responses, streaming, tools, and vision capabilities. It never exposes model file paths or Tokens.
 
 When Tool Calling is `disabled`, Codex can use text responses only. To use file and shell tools in an Agent Loop, configure an appropriate `native` or `json` mode in the Bundle and verify it with `doctor`.
 
@@ -374,7 +374,40 @@ When Tool Calling is `disabled`, Codex can use text responses only. To use file 
 - `POST /v1/chat/completions`: existing Chat Completions API
 - `POST /v1/responses`: Responses API for Codex
 
-### 6.2 Errors and request IDs
+### 6.2 Sending an image to the Responses API
+
+The Responses API accepts JPEG and PNG Data URIs when the Bundle configures `mmproj` and uses the managed llama-server runtime. Codex CLI users do not need to convert the image file to Base64 manually.
+
+```bash
+codex exec --profile hoshikage \
+  --image /absolute/path/camera.jpg \
+  "Describe this image briefly."
+```
+
+For a direct Hoshikage request, set `input_image.image_url` to `data:image/jpeg;base64,...` or `data:image/png;base64,...`. The Responses API does not accept external URLs or local file paths. Check that `GET /v1/models` includes `image` in `input_modalities` first.
+
+Invalid Base64, a mismatch between the MIME type and image content, or an oversized image produces `invalid_image`. A Bundle without effective Vision support produces `vision_not_supported`. Streaming and non-streaming requests use the same input rules.
+
+### 6.3 Images returned by Codex Agent tools
+
+During an Agent Loop, Codex may select `view_image` to read a local image. Codex then returns that
+image to Hoshikage as a Content Item array in `function_call_output`. Hoshikage validates mixed
+`input_text` and `input_image` results under the same rules as normal Vision input and forwards them
+to the model in both streaming and non-streaming requests. Users do not need extra configuration or
+manual Base64 conversion.
+
+```text
+Codex -> view_image -> function_call_output(input_image)
+      -> Hoshikage Responses API -> Vision Bundle
+```
+
+Codex and the selected LLM decide whether to use `view_image`. Hoshikage translates Tool definitions
+and results, but it neither executes Tools nor forces the model to select one. If the Tool is not
+selected, verify the Bundle's Tool capability and explicitly provide the absolute image path and ask
+the Agent to read it with `view_image`. A model may still decline to select the Tool because of its
+Tool Calling capability.
+
+### 6.4 Errors and request IDs
 
 The Responses API returns OpenAI-compatible errors and an `x-request-id` header. Use the request ID, not request bodies or Tokens, when correlating logs or reporting a problem.
 

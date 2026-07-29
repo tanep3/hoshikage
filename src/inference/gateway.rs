@@ -26,6 +26,8 @@ pub enum InferenceGatewayError {
     ContextLengthExceeded,
     #[error("model does not support tool calling")]
     ToolCallingNotSupported,
+    #[error("model does not support image input")]
+    VisionNotSupported,
     #[error("tool schema is invalid")]
     InvalidToolSchema,
     #[error("tool arguments are invalid")]
@@ -108,6 +110,9 @@ fn map_hoshikage_error(error: crate::error::HoshikageError) -> InferenceGatewayE
         }
         crate::error::HoshikageError::ToolCallingNotSupported => {
             InferenceGatewayError::ToolCallingNotSupported
+        }
+        crate::error::HoshikageError::VisionNotSupported => {
+            InferenceGatewayError::VisionNotSupported
         }
         crate::error::HoshikageError::InvalidToolSchema => InferenceGatewayError::InvalidToolSchema,
         crate::error::HoshikageError::InvalidToolArguments

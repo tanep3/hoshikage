@@ -71,6 +71,13 @@ pub fn responses_error(error: ResponsesServiceError) -> Response {
             Some("tools".to_string()),
             "tool_calling_not_supported",
         ),
+        ResponsesServiceError::Inference(InferenceGatewayError::VisionNotSupported) => (
+            StatusCode::BAD_REQUEST,
+            "Model does not support image input".to_string(),
+            "invalid_request_error",
+            Some("input".to_string()),
+            "vision_not_supported",
+        ),
         ResponsesServiceError::Inference(InferenceGatewayError::InvalidToolSchema) => (
             StatusCode::BAD_REQUEST,
             "Tool schema is invalid".to_string(),

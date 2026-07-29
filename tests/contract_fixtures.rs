@@ -120,6 +120,28 @@ fn codex_tool_result_preserves_call_identity_and_json_arguments() {
 }
 
 #[test]
+fn codex_0_145_view_image_output_preserves_multimodal_content() {
+    let manifest = read_json("codex/0.145.x/manifest.json");
+    let request = read_json("codex/0.145.x/view-image-output-request.json");
+    let input = request["input"].as_array().expect("input must be an array");
+    let function_call = &input[0];
+    let function_output = &input[1];
+    let output = function_output["output"]
+        .as_array()
+        .expect("view_image output must be a content item array");
+
+    assert_eq!(manifest["client"]["version"], "0.145.0");
+    assert_eq!(function_call["call_id"], function_output["call_id"]);
+    assert_eq!(output[0]["type"], "input_text");
+    assert_eq!(output[1]["type"], "input_image");
+    assert!(output[1]["image_url"]
+        .as_str()
+        .is_some_and(|url| url.starts_with("data:image/jpeg;base64,")));
+    assert_eq!(output[1]["detail"], "original");
+    assert_eq!(request["stream"], true);
+}
+
+#[test]
 fn codex_text_sse_event_order_is_preserved() {
     assert_eq!(
         event_types("codex/0.144.x/expected-text-events.jsonl"),

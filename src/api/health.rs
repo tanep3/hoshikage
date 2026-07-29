@@ -49,28 +49,37 @@ pub async fn ready(State(manager): State<Arc<crate::model::ModelManager>>) -> Re
     }
 }
 
-pub async fn capabilities() -> Json<CapabilitiesResponse> {
-    Json(CapabilitiesResponse {
-        responses_api: true,
-        streaming: true,
-        function_calling: true,
-        parallel_tool_calls: false,
-        vision: false,
-    })
+impl CapabilitiesResponse {
+    fn responses(vision: bool) -> Self {
+        Self {
+            responses_api: true,
+            streaming: true,
+            function_calling: true,
+            parallel_tool_calls: false,
+            vision,
+        }
+    }
+}
+
+pub async fn capabilities(
+    State(manager): State<Arc<crate::model::ModelManager>>,
+) -> Json<CapabilitiesResponse> {
+    let vision = manager.responses_vision_available().await;
+    Json(CapabilitiesResponse::responses(vision))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn phase_four_capabilities_advertise_streaming_without_parallel_tools() {
-        let response = capabilities().await;
+    #[test]
+    fn capabilities_advertise_responses_vision_without_parallel_tools() {
+        let response = CapabilitiesResponse::responses(true);
 
         assert!(response.responses_api);
         assert!(response.streaming);
         assert!(response.function_calling);
         assert!(!response.parallel_tool_calls);
-        assert!(!response.vision);
+        assert!(response.vision);
     }
 }

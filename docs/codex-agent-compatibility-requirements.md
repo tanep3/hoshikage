@@ -233,7 +233,7 @@ flowchart TD
 5. Hoshikage SHALL Item の受信順序、role、`call_id` の対応関係を保持する。
 6. IF `function_call_output` に対応する過去の `function_call` が同一リクエスト履歴内にない THEN Hoshikage SHALL `orphan_function_call_output` を返す。
 7. 未知の Input Item Type は履歴欠落を避けるため黙って無視せず、初期版では明示エラーにする。
-8. `input_image` は Vision Phase まで明示的な未対応または Bundle 能力エラーとする。
+8. `input_image` は REQ-025 のVision入力契約に従って処理する。
 
 ### REQ-004 ステートレス継続
 
@@ -607,6 +607,28 @@ codex exec --profile yatagarasu-local "Return exactly the word OK."
 14. Linux、macOS、Windowsを同格の利用環境として扱い、Hoshikage server側の設定場所と、上位application/Codex側の設定・環境変数を混同しない。
 15. `hoshikage token list`が管理者用操作としてplaintextを表示することと、端末出力を共有・記録しない注意を説明する。
 
+### REQ-025 Responses Vision入力
+
+**ユーザーストーリー:** Codex利用者として、ローカル画像をResponses API経由でVision Bundleへ渡し、Tool利用と画像理解を同じAgent Loopで行いたい。
+
+#### 受け入れ条件
+
+1. Hoshikage SHALL `message.content`内の`input_text`と`input_image`を受理し、受信順序と同一messageを保持する。
+2. 初期対応する画像sourceは`data:image/jpeg;base64,...`および`data:image/png;base64,...`とする。
+3. Base64、MIME type、JPEG/PNG signature、decoded sizeを推論開始前に検証する。
+4. 不正画像はHTTP 400、`invalid_image`、`param=input`で安全に拒否する。
+5. `mmproj`未設定またはResponses Vision非対応runtimeのBundleはHTTP 400、`vision_not_supported`で拒否する。
+6. 非streamとstreamは同じ正規化済み会話構造とVision推論経路を使用する。
+7. `/v1/models`、`/v1/hoshikage/models`、`/v1/capabilities`は、現在のruntimeでResponses Visionを実行できる場合だけ画像能力を公開する。
+8. 画像なしResponsesおよび既存Chat Completions Visionを破壊しない。
+9. llama-serverの正確なtoken計測が利用できない場合、Base64文字列をtext tokenとして数えず、画像ごとの保守的なVision予算でcontextを検証する。
+10. Codex CLIのローカル画像添付からHoshikage Responses APIを経由し、画像内容に基づく応答が得られることを実機確認する。
+11. Hoshikage SHALL `function_call_output.output`について、従来の文字列とContent Item配列の両方を受理する。
+12. Content Item配列は最低限`input_text`、`input_image`、複数Item、`detail: high`、`detail: original`を扱い、受信順序を保持する。
+13. Tool結果内の`input_image`は、通常messageの画像入力と同じBase64、MIME、signature、decoded size検証を通過しなければならない。
+14. Tool結果に画像を含む場合も、対応する`function_call.call_id`との関連を保持し、streamと非streamで同じVision推論経路を使用する。
+15. Codex CLI 0.145.xの`view_image` Tool結果を表す固定Fixtureを保持し、wire形式の回帰を検出する。
+
 ---
 
 ## 7. 非機能要件
@@ -847,7 +869,7 @@ Hoshikage の Provider 境界は Yatagarasu に限定しない。OpenClaw 等の
 
 ### Phase 7: 高度機能
 
-- Vision `input_image`
+- Vision `input_image`（最初の独立項目として実施）
 - 並列 Tool Call
 - reasoning Item
 - stateful Responses

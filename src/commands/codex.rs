@@ -1,7 +1,7 @@
 use crate::codex::{
     build_model_catalog, render_codex_config, CodexConfigOptions, CodexProfileMode,
 };
-use crate::config::Config;
+use crate::config::{Config, RuntimeBackendKind};
 use crate::error::Result;
 use crate::i18n::Language;
 use crate::model::ModelRegistry;
@@ -32,7 +32,11 @@ pub async fn codex_config(
 pub async fn codex_model_catalog(json: bool, language: Language) -> Result<()> {
     let config = Config::load()?;
     let registry = loaded_registry(config.clone()).await?;
-    let catalog = build_model_catalog(&registry.snapshot().await, config.n_ctx);
+    let catalog = build_model_catalog(
+        &registry.snapshot().await,
+        config.n_ctx,
+        config.runtime_backend == RuntimeBackendKind::LlamaServerManaged,
+    );
     if json {
         println!("{}", serde_json::to_string_pretty(&catalog)?);
         return Ok(());

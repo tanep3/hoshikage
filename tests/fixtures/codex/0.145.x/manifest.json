@@ -1,0 +1,13 @@
+{
+  "client": {
+    "name": "OpenAI Codex CLI",
+    "version": "0.145.0"
+  },
+  "contract": "view_image function_call_output multimodal content",
+  "provenance": "normalized from observed Yatagarasu production request",
+  "normalization": {
+    "call_id": "stable fixture value",
+    "image": "minimal valid JPEG signature payload",
+    "secrets": "removed"
+  }
+}
