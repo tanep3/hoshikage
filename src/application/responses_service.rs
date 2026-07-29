@@ -61,6 +61,7 @@ pub struct ResponsesRequestLimits {
     pub max_tools: usize,
     pub max_tool_argument_bytes: usize,
     pub max_tool_result_bytes: usize,
+    pub max_image_bytes: usize,
 }
 
 impl Default for ResponsesRequestLimits {
@@ -71,6 +72,7 @@ impl Default for ResponsesRequestLimits {
             max_tools: 128,
             max_tool_argument_bytes: 65_536,
             max_tool_result_bytes: 4_194_304,
+            max_image_bytes: 6_291_456,
         }
     }
 }
@@ -446,6 +448,7 @@ fn inference_error_class(error: &InferenceGatewayError) -> &'static str {
         InferenceGatewayError::ModelNotFound => "model_not_found",
         InferenceGatewayError::ModelLoadFailed => "model_load_failed",
         InferenceGatewayError::ToolCallingNotSupported => "tool_calling_not_supported",
+        InferenceGatewayError::VisionNotSupported => "vision_not_supported",
         InferenceGatewayError::InvalidToolSchema => "invalid_tool_schema",
         InferenceGatewayError::InvalidToolArguments => "invalid_tool_arguments",
         InferenceGatewayError::ToolChoiceViolation => "tool_choice_violation",
@@ -507,6 +510,10 @@ fn stream_failure(error: &InferenceGatewayError) -> StreamFailure {
         InferenceGatewayError::ContextLengthExceeded => StreamFailure {
             code: "context_length_exceeded",
             message: "Context length exceeded",
+        },
+        InferenceGatewayError::VisionNotSupported => StreamFailure {
+            code: "vision_not_supported",
+            message: "Model does not support image input",
         },
         InferenceGatewayError::TranslationFailed => StreamFailure {
             code: "response_translation_failed",
@@ -587,6 +594,7 @@ mod tests {
             max_tools: 8,
             max_tool_argument_bytes: 512,
             max_tool_result_bytes: 1024,
+            max_image_bytes: 1024,
         }
     }
 

@@ -388,7 +388,47 @@ pub enum ContentPart {
 }
 ```
 
-初期版ではResponses経路の`Image`を能力エラーとし、型だけをChat/Visionとの共通化に利用する。
+Phase 7 Vision以降、Responses wire層は検証済みData URIを`ImageInput`へ正規化する。
+Chat CompletionsとResponsesは、この内部型からmanaged llama-server向けmultimodal messageを
+構築する共通推論経路へ合流する。
+
+#### 6.2.1 Responses Vision入力
+
+```text
+input_image Data URI
+    ↓ Responses wire validation
+Base64 decode / MIME / signature / size
+    ↓
+ContentPart::Image(ImageInput)
+    ↓ Bundle effective capability
+managed llama-server + mmproj
+    ↓
+Chat Completions multimodal content
+```
+
+wire層はJPEGとPNGのData URIだけを受理し、外部URLやserver local pathをResponses APIから
+参照しない。textとimageの順序を保持し、stream/non-streamの分岐前に同じ`ModelRequest`へ
+変換する。非Vision Bundleはruntime起動前に`vision_not_supported`とする。
+
+HTTP body上限からBase64 overheadを除いた値をdecoded image上限とする。正確なupstream
+token計測が失敗した場合、Base64 byte列をtext tokenとして扱わず、画像ごとの固定保守予算と
+残りのJSON byte数でcontextを検証する。
+
+`input_image`の入口は通常の`message.content`だけに限定しない。Codexの`view_image`
+Function Toolは、実行結果を`function_call_output.output`のContent Item配列として返す。
+wire層はこの配列にも同じcontent正規化関数を適用し、検証済み`ContentPart`へ合流させる。
+
+```text
+function_call_output.output[]
+    ↓ shared content normalization
+input_text / input_image
+    ↓
+ToolOutputContent::Items(Vec<ContentPart>)
+    ↓
+managed llama-server multimodal tool message
+```
+
+これにより、初回画像添付とTool実行後の画像返却で検証規則が分岐しない。
 
 ### 6.3 Function CallとResult
 
@@ -410,14 +450,21 @@ pub struct ToolArguments {
 pub struct FunctionCallOutput {
     pub call_id: CallId,
     pub outcome: ToolOutcome,
+    pub content: ToolOutputContent,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolOutcome {
-    Success(String),
-    Failure(String),
-    Rejected(String),
-    Cancelled(String),
+    Success,
+    Failure,
+    Rejected,
+    Cancelled,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum ToolOutputContent {
+    Text(String),
+    Items(Vec<ContentPart>),
 }
 ```
 
@@ -425,7 +472,15 @@ pub enum ToolOutcome {
 
 `Conversation`、`Message`、`FunctionCall`、`FunctionCallOutput`は秘匿本文を推移的に所有するため、通常の`Debug`をderiveしない。診断には本文を除いた`ConversationSummary`と`ToolPayloadSummary`だけを使う。
 
-Responses WireがTool結果のstatusを明示する場合は`ToolOutcome`へ対応づける。単純文字列しか持たない場合は本文を改変せず`Success`として保持し、Hoshikageが文字列内容から成功・失敗を推測しない。Codex Fixtureでerror表現が確認できた場合、その構造だけを明示的にconverterへ追加する。
+Responses WireがTool結果のstatusを明示する場合は`ToolOutcome`へ対応づける。実行状態と本文を
+別型に分け、文字列結果を`Text`、Content Item配列を`Items`として保持する。単純文字列しか
+持たない場合は本文を改変せず`Success`として保持し、Hoshikageが文字列内容から成功・失敗を
+推測しない。
+
+`Items`内の画像は`Message`と同じ`ContentPart::Image`であるため、Bundle能力検証、context
+見積もり、llama-server multimodal変換を共有する。Tool結果のtext byte上限は文字列と配列の
+text部分へ適用し、画像はdecoded image上限とHTTP body上限で制御する。Codex Fixtureで
+新しい表現が確認できた場合、その構造だけを明示的にconverterへ追加する。
 
 ### 6.4 ConversationIndex
 
@@ -1661,6 +1716,11 @@ streaming =
     AND runtime stream available
 
 parallel_tool_calls = false
+
+vision =
+    responses
+    AND managed llama-server runtime
+    AND Bundle mmproj configured
 ```
 
 JSON modeでstreamをbufferする場合もResponses SSE契約を返せるため`streaming=true`とする。ただしdiagnosticへ`buffered_tool_classification`を記録する。
@@ -2190,13 +2250,14 @@ AC-001最終判定はSSEを実装するPhase 4で行い、Phase 2では同等の
 
 ### Phase 7: 高度機能
 
-- Responses `input_image`
+- Responses `input_image`（最初の独立項目）
 - parallel Tool Call
 - reasoning Item
 - stateful Responses
 - parser/capability自動検出高度化
 
-Phase 7は本設計の初期実装対象外である。
+Phase 7は項目ごとに独立して設計・受入判定する。Responses `input_image`の設計は6.2.1、
+14、15、17を正規契約とし、他の高度機能を同時に有効化しない。
 
 ---
 
@@ -2228,6 +2289,7 @@ Phase 7は本設計の初期実装対象外である。
 | REQ-022 privacy/egress | 16.5、18.2 |
 | REQ-023 Fixture/regression | 21.4から21.9 |
 | REQ-024 Manual | 19.2、19.5 |
+| REQ-025 Responses Vision | 6.2.1、14、15、17 |
 
 ---
 
@@ -2396,7 +2458,7 @@ Phase 7は本設計の初期実装対象外である。
 
 設計Fix前に次を確認する。
 
-- [x] 要件24件が設計へtraceされている
+- [x] 要件25件が設計へtraceされている
 - [x] Codex、Hoshikage、llama-serverの責務が混在していない
 - [x] Wire DTOがDomain/Runtimeへ漏れていない
 - [x] Tool実行がHoshikageへ入っていない

@@ -17,6 +17,7 @@ Hoshikageの正規ドキュメントと作業記録への入口です。
 9. [Phase 4作業ログ](phase_logs/codex-agent-compatibility-phase-4.md)
 10. [Phase 5作業ログ](phase_logs/codex-agent-compatibility-phase-5.md)
 11. [Phase 6作業ログ](phase_logs/codex-agent-compatibility-phase-6.md)
+12. [Phase 7 Vision作業ログ](phase_logs/codex-agent-compatibility-phase-7.md)
 
 要件定義書とシステム設計書を正規仕様とする。`research/`は再利用可能な調査結果、
 `phase_logs/`は実装・テスト・失敗を含む時系列記録である。

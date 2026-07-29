@@ -50,6 +50,9 @@ pub enum HoshikageError {
     #[error("model does not support tool calling")]
     ToolCallingNotSupported,
 
+    #[error("model does not support image input")]
+    VisionNotSupported,
+
     #[error("tool schema is invalid")]
     InvalidToolSchema,
 

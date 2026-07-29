@@ -100,6 +100,7 @@ struct CodexSandboxWorkspaceWrite {
 pub fn build_model_catalog(
     models: &HashMap<String, ModelConfig>,
     default_context_window: u32,
+    responses_vision_enabled: bool,
 ) -> CodexModelCatalog {
     let mut data = models
         .iter()
@@ -113,7 +114,7 @@ pub fn build_model_catalog(
                     responses: true,
                     streaming: true,
                     tools: model.tool_calling.mode != crate::model::ToolCallingMode::Disabled,
-                    vision: model.mmproj.is_some(),
+                    vision: responses_vision_enabled && model.mmproj.is_some(),
                     reasoning: false,
                 },
                 tool_calling: CodexToolCalling {
@@ -234,7 +235,7 @@ mod tests {
             ),
         ]);
 
-        let catalog = build_model_catalog(&models, 4_096);
+        let catalog = build_model_catalog(&models, 4_096, true);
         assert_eq!(
             catalog
                 .data
@@ -250,6 +251,9 @@ mod tests {
         assert!(!serde_json::to_string(&catalog)
             .unwrap()
             .contains("/private/models"));
+
+        let catalog_without_vision_runtime = build_model_catalog(&models, 4_096, false);
+        assert!(!catalog_without_vision_runtime.data[0].capabilities.vision);
     }
 
     #[test]

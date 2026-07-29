@@ -177,6 +177,9 @@ mod tests {
             if model.as_str() == "context-too-small" {
                 return Err(InferenceGatewayError::ContextLengthExceeded);
             }
+            if model.as_str() == "text-only" {
+                return Err(InferenceGatewayError::VisionNotSupported);
+            }
             if model.as_str() == "slow" {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
@@ -206,6 +209,9 @@ mod tests {
             model: &ModelId,
             _request: ModelRequest,
         ) -> Result<ModelActionStream, InferenceGatewayError> {
+            if model.as_str() == "text-only" {
+                return Err(InferenceGatewayError::VisionNotSupported);
+            }
             if model.as_str() == "tool-stream" {
                 return Ok(Box::pin(futures_util::stream::iter(vec![
                     Ok(ModelStreamAction::BeginFunctionCall {
@@ -261,6 +267,7 @@ mod tests {
                 max_tools: 16,
                 max_tool_argument_bytes: 2048,
                 max_tool_result_bytes: 4096,
+                max_image_bytes: 4096,
             },
         ));
         Router::new()
@@ -560,6 +567,123 @@ mod tests {
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["error"]["code"], "context_length_exceeded");
         assert_eq!(value["error"]["param"], "max_output_tokens");
+    }
+
+    #[tokio::test]
+    async fn non_vision_model_rejects_image_for_non_stream_and_stream_requests() {
+        for stream in [false, true] {
+            let body = serde_json::json!({
+                "model": "text-only",
+                "stream": stream,
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Describe this image."},
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/jpeg;base64,/9j/2Q=="
+                        }
+                    ]
+                }]
+            });
+            let response = router()
+                .oneshot(
+                    Request::post("/v1/responses")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["error"]["code"], "vision_not_supported");
+            assert_eq!(value["error"]["param"], "input");
+        }
+    }
+
+    #[tokio::test]
+    async fn jpeg_and_png_images_are_accepted_for_non_stream_and_stream_requests() {
+        for (media_type, encoded) in [("image/jpeg", "/9j/2Q=="), ("image/png", "iVBORw0KGgo=")] {
+            for stream in [false, true] {
+                let body = serde_json::json!({
+                    "model": "vision-model",
+                    "stream": stream,
+                    "input": [{
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Describe this image."},
+                            {
+                                "type": "input_image",
+                                "image_url": format!("data:{media_type};base64,{encoded}")
+                            }
+                        ]
+                    }]
+                });
+                let response = router()
+                    .oneshot(
+                        Request::post("/v1/responses")
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+
+                assert_eq!(response.status(), StatusCode::OK);
+                if stream {
+                    assert_eq!(response.headers()["content-type"], "text/event-stream");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn multimodal_function_output_is_accepted_for_non_stream_and_stream_requests() {
+        for stream in [false, true] {
+            let body = serde_json::json!({
+                "model": "vision-model",
+                "stream": stream,
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_view",
+                        "name": "view_image",
+                        "arguments": "{\"path\":\"/tmp/capture.jpg\"}"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_view",
+                        "output": [
+                            {"type": "input_text", "text": "Captured image"},
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/jpeg;base64,/9j/2Q==",
+                                "detail": "original"
+                            }
+                        ]
+                    }
+                ]
+            });
+            let response = router()
+                .oneshot(
+                    Request::post("/v1/responses")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            if stream {
+                assert_eq!(response.headers()["content-type"], "text/event-stream");
+            }
+        }
     }
 
     #[tokio::test]

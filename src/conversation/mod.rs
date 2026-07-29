@@ -184,18 +184,50 @@ pub struct FunctionCall {
     pub arguments: ToolArguments,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolOutcome {
-    Success(String),
-    Failure(String),
-    Rejected(String),
-    Cancelled(String),
+    Success,
+    Failure,
+    Rejected,
+    Cancelled,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum ToolOutputContent {
+    Text(String),
+    Items(Vec<ContentPart>),
+}
+
+impl ToolOutputContent {
+    pub fn encoded_bytes(&self) -> usize {
+        match self {
+            Self::Text(text) => text.len(),
+            Self::Items(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    ContentPart::Text(text) => text.len(),
+                    ContentPart::Image(image) => image.source.len(),
+                })
+                .sum(),
+        }
+    }
+
+    pub fn contains_image(&self) -> bool {
+        matches!(
+            self,
+            Self::Items(parts)
+                if parts
+                    .iter()
+                    .any(|part| matches!(part, ContentPart::Image(_)))
+        )
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct FunctionCallOutput {
     pub call_id: CallId,
     pub outcome: ToolOutcome,
+    pub content: ToolOutputContent,
 }
 
 #[derive(Clone, PartialEq)]
@@ -316,7 +348,8 @@ mod tests {
             ConversationItem::FunctionCall(call),
             ConversationItem::FunctionCallOutput(FunctionCallOutput {
                 call_id: call_id.clone(),
-                outcome: ToolOutcome::Success("secret file body".to_string()),
+                outcome: ToolOutcome::Success,
+                content: ToolOutputContent::Text("secret file body".to_string()),
             }),
         ]);
 
@@ -338,7 +371,8 @@ mod tests {
         let orphan = Conversation::new(vec![ConversationItem::FunctionCallOutput(
             FunctionCallOutput {
                 call_id: orphan_id,
-                outcome: ToolOutcome::Success("output".to_string()),
+                outcome: ToolOutcome::Success,
+                content: ToolOutputContent::Text("output".to_string()),
             },
         )]);
         assert!(matches!(
@@ -358,7 +392,8 @@ mod tests {
         let call = call("call_2");
         let output = FunctionCallOutput {
             call_id: call.call_id.clone(),
-            outcome: ToolOutcome::Success("output".to_string()),
+            outcome: ToolOutcome::Success,
+            content: ToolOutputContent::Text("output".to_string()),
         };
         let repeated = Conversation::new(vec![
             ConversationItem::FunctionCall(call),

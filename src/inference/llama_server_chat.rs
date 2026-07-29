@@ -1,5 +1,5 @@
 use super::{ModelCompletion, ModelRequest, RawModelToolCall, TokenUsage, ToolChoice};
-use crate::conversation::{ContentPart, ConversationItem, ModelId, ToolOutcome};
+use crate::conversation::{ContentPart, ConversationItem, ModelId, ToolOutcome, ToolOutputContent};
 use crate::model::{ModelConfig, ThinkingMode};
 use serde::Deserialize;
 use serde_json::Value;
@@ -21,23 +21,10 @@ pub fn build_chat_request(
         .items()
         .iter()
         .map(|item| match item {
-            ConversationItem::Message(message) => {
-                let mut text = Vec::new();
-                for part in &message.content {
-                    match part {
-                        ContentPart::Text(content) => text.push(content.as_str()),
-                        ContentPart::Image(_) => {
-                            return Err(crate::error::HoshikageError::InferenceError(
-                                "Responses text request contained image content".to_string(),
-                            ))
-                        }
-                    }
-                }
-                Ok(serde_json::json!({
-                    "role": message.role.as_str(),
-                    "content": text.join("\n")
-                }))
-            }
+            ConversationItem::Message(message) => Ok(serde_json::json!({
+                "role": message.role.as_str(),
+                "content": chat_message_content(&message.content)
+            })),
             ConversationItem::FunctionCall(call) => Ok(serde_json::json!({
                 "role": "assistant",
                 "content": Value::Null,
@@ -51,18 +38,7 @@ pub fn build_chat_request(
                 }]
             })),
             ConversationItem::FunctionCallOutput(output) => {
-                let content = match &output.outcome {
-                    ToolOutcome::Success(content) => content.clone(),
-                    ToolOutcome::Failure(content) => {
-                        format!("Tool execution failed:\n{content}")
-                    }
-                    ToolOutcome::Rejected(content) => {
-                        format!("Tool execution was rejected:\n{content}")
-                    }
-                    ToolOutcome::Cancelled(content) => {
-                        format!("Tool execution was cancelled:\n{content}")
-                    }
-                };
+                let content = tool_output_content(output.outcome, &output.content);
                 Ok(serde_json::json!({
                     "role": "tool",
                     "tool_call_id": output.call_id.as_str(),
@@ -138,6 +114,73 @@ pub fn build_chat_request(
         body["parallel_tool_calls"] = Value::Bool(false);
     }
     Ok(body)
+}
+
+fn chat_message_content(parts: &[ContentPart]) -> Value {
+    if parts
+        .iter()
+        .all(|part| matches!(part, ContentPart::Text(_)))
+    {
+        return Value::String(
+            parts
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text(text) => Some(text.as_str()),
+                    ContentPart::Image(_) => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+
+    chat_content_items(parts)
+}
+
+fn tool_output_content(outcome: ToolOutcome, content: &ToolOutputContent) -> Value {
+    let prefix = match outcome {
+        ToolOutcome::Success => None,
+        ToolOutcome::Failure => Some("Tool execution failed:"),
+        ToolOutcome::Rejected => Some("Tool execution was rejected:"),
+        ToolOutcome::Cancelled => Some("Tool execution was cancelled:"),
+    };
+    match content {
+        ToolOutputContent::Text(text) => Value::String(match prefix {
+            Some(prefix) => format!("{prefix}\n{text}"),
+            None => text.clone(),
+        }),
+        ToolOutputContent::Items(parts) => {
+            let mut parts = parts.clone();
+            if let Some(prefix) = prefix {
+                parts.insert(0, ContentPart::Text(prefix.to_string()));
+            }
+            chat_content_items(&parts)
+        }
+    }
+}
+
+fn chat_content_items(parts: &[ContentPart]) -> Value {
+    Value::Array(
+        parts
+            .iter()
+            .map(|part| match part {
+                ContentPart::Text(text) => serde_json::json!({
+                    "type": "text",
+                    "text": text
+                }),
+                ContentPart::Image(image) => {
+                    let mut image_url = serde_json::Map::new();
+                    image_url.insert("url".to_string(), Value::String(image.source.clone()));
+                    if let Some(detail) = &image.detail {
+                        image_url.insert("detail".to_string(), Value::String(detail.clone()));
+                    }
+                    serde_json::json!({
+                        "type": "image_url",
+                        "image_url": image_url
+                    })
+                }
+            })
+            .collect(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -252,10 +295,10 @@ mod tests {
     }
 
     fn tool_request() -> ModelRequest {
-        tool_request_with_outcome(ToolOutcome::Success("Hoshikage".to_string()))
+        tool_request_with_outcome(ToolOutcome::Success, "Hoshikage")
     }
 
-    fn tool_request_with_outcome(outcome: ToolOutcome) -> ModelRequest {
+    fn tool_request_with_outcome(outcome: ToolOutcome, content: &str) -> ModelRequest {
         let call_id = CallId::new("call_previous").unwrap();
         ModelRequest {
             conversation: Conversation::new(vec![
@@ -265,7 +308,11 @@ mod tests {
                     name: ToolName::new("read_file").unwrap(),
                     arguments: ToolArguments::parse(r#"{"path":"README.md"}"#).unwrap(),
                 }),
-                ConversationItem::FunctionCallOutput(FunctionCallOutput { call_id, outcome }),
+                ConversationItem::FunctionCallOutput(FunctionCallOutput {
+                    call_id,
+                    outcome,
+                    content: ToolOutputContent::Text(content.to_string()),
+                }),
             ]),
             tools: ModelToolSet::new(vec![ModelTool {
                 name: ToolName::new("read_file").unwrap(),
@@ -317,6 +364,59 @@ mod tests {
     }
 
     #[test]
+    fn adapter_preserves_multimodal_content_for_stream_and_non_stream_requests() {
+        for stream in [false, true] {
+            let mut request = request();
+            request.stream = stream;
+            request.conversation = Conversation::new(vec![ConversationItem::Message(
+                Message::new(
+                    Role::User,
+                    vec![
+                        ContentPart::Text("Describe this image.".to_string()),
+                        ContentPart::Image(crate::conversation::ImageInput {
+                            source: "data:image/jpeg;base64,/9j/2Q==".to_string(),
+                            detail: Some("high".to_string()),
+                        }),
+                    ],
+                )
+                .unwrap(),
+            )]);
+
+            let body = build_chat_request(
+                &ModelId::new("gemma4").unwrap(),
+                &request,
+                &ModelConfig::new_legacy(
+                    "/models".to_string(),
+                    "model.gguf".to_string(),
+                    Vec::new(),
+                ),
+                &LlamaServerChatDefaults {
+                    temperature: 0.2,
+                    top_p: 0.8,
+                    repeat_penalty: 1.1,
+                },
+            )
+            .unwrap();
+
+            assert_eq!(body["stream"], stream);
+            assert_eq!(body["messages"][0]["content"][0]["type"], "text");
+            assert_eq!(
+                body["messages"][0]["content"][0]["text"],
+                "Describe this image."
+            );
+            assert_eq!(body["messages"][0]["content"][1]["type"], "image_url");
+            assert_eq!(
+                body["messages"][0]["content"][1]["image_url"]["url"],
+                "data:image/jpeg;base64,/9j/2Q=="
+            );
+            assert_eq!(
+                body["messages"][0]["content"][1]["image_url"]["detail"],
+                "high"
+            );
+        }
+    }
+
+    #[test]
     fn adapter_requires_usage_in_success_response() {
         let error = parse_chat_response(br#"{"choices":[{"message":{"content":"OK"}}]}"#)
             .err()
@@ -351,26 +451,81 @@ mod tests {
     }
 
     #[test]
+    fn adapter_preserves_multimodal_tool_output_for_stream_and_non_stream_requests() {
+        for stream in [false, true] {
+            let mut request = tool_request();
+            request.stream = stream;
+            request.conversation = Conversation::new(
+                request
+                    .conversation
+                    .into_items()
+                    .into_iter()
+                    .map(|item| match item {
+                        ConversationItem::FunctionCallOutput(mut output) => {
+                            output.content = ToolOutputContent::Items(vec![
+                                ContentPart::Text("Captured image".to_string()),
+                                ContentPart::Image(crate::conversation::ImageInput {
+                                    source: "data:image/jpeg;base64,/9j/2Q==".to_string(),
+                                    detail: Some("original".to_string()),
+                                }),
+                            ]);
+                            ConversationItem::FunctionCallOutput(output)
+                        }
+                        item => item,
+                    })
+                    .collect(),
+            );
+
+            let body = build_chat_request(
+                &ModelId::new("gemma4").unwrap(),
+                &request,
+                &ModelConfig::new_legacy(
+                    "/models".to_string(),
+                    "model.gguf".to_string(),
+                    Vec::new(),
+                ),
+                &LlamaServerChatDefaults {
+                    temperature: 0.2,
+                    top_p: 0.8,
+                    repeat_penalty: 1.1,
+                },
+            )
+            .unwrap();
+
+            let tool_content = &body["messages"][2]["content"];
+            assert_eq!(body["stream"], stream);
+            assert_eq!(tool_content[0]["type"], "text");
+            assert_eq!(tool_content[0]["text"], "Captured image");
+            assert_eq!(tool_content[1]["type"], "image_url");
+            assert_eq!(
+                tool_content[1]["image_url"]["url"],
+                "data:image/jpeg;base64,/9j/2Q=="
+            );
+            assert_eq!(tool_content[1]["image_url"]["detail"], "original");
+        }
+    }
+
+    #[test]
     fn adapter_preserves_side_effect_tool_outcomes_for_model_recovery() {
-        for (outcome, expected) in [
+        for (outcome, content, expected) in [
+            (ToolOutcome::Success, "saved", "saved".to_string()),
             (
-                ToolOutcome::Success("saved".to_string()),
-                "saved".to_string(),
-            ),
-            (
-                ToolOutcome::Failure("database unavailable".to_string()),
+                ToolOutcome::Failure,
+                "database unavailable",
                 "Tool execution failed:\ndatabase unavailable".to_string(),
             ),
             (
-                ToolOutcome::Rejected("user denied".to_string()),
+                ToolOutcome::Rejected,
+                "user denied",
                 "Tool execution was rejected:\nuser denied".to_string(),
             ),
             (
-                ToolOutcome::Cancelled("request cancelled".to_string()),
+                ToolOutcome::Cancelled,
+                "request cancelled",
                 "Tool execution was cancelled:\nrequest cancelled".to_string(),
             ),
         ] {
-            let request = tool_request_with_outcome(outcome);
+            let request = tool_request_with_outcome(outcome, content);
 
             let body = build_chat_request(
                 &ModelId::new("gemma4").unwrap(),

@@ -1,5 +1,7 @@
 use super::{ModelCompletion, ModelRequest, RawModelToolCall, ToolChoice};
-use crate::conversation::{Conversation, ConversationItem, ToolArguments, ToolOutcome};
+use crate::conversation::{
+    ContentPart, Conversation, ConversationItem, ToolArguments, ToolOutputContent,
+};
 use crate::model::{ModelConfig, ToolCallingMode, ToolParserId, ToolResultPolicy};
 
 pub fn apply_tool_result_policy(
@@ -21,20 +23,12 @@ pub fn apply_tool_result_policy(
             .into_iter()
             .map(|item| match item {
                 ConversationItem::FunctionCallOutput(mut output) => {
-                    output.outcome = match output.outcome {
-                        ToolOutcome::Success(content) => ToolOutcome::Success(
-                            truncate_tool_result(&content, max_bytes, head_bytes, tail_bytes),
-                        ),
-                        ToolOutcome::Failure(content) => ToolOutcome::Failure(
-                            truncate_tool_result(&content, max_bytes, head_bytes, tail_bytes),
-                        ),
-                        ToolOutcome::Rejected(content) => ToolOutcome::Rejected(
-                            truncate_tool_result(&content, max_bytes, head_bytes, tail_bytes),
-                        ),
-                        ToolOutcome::Cancelled(content) => ToolOutcome::Cancelled(
-                            truncate_tool_result(&content, max_bytes, head_bytes, tail_bytes),
-                        ),
-                    };
+                    output.content = truncate_tool_output_content(
+                        output.content,
+                        max_bytes,
+                        head_bytes,
+                        tail_bytes,
+                    );
                     ConversationItem::FunctionCallOutput(output)
                 }
                 item => item,
@@ -42,6 +36,35 @@ pub fn apply_tool_result_policy(
             .collect(),
     );
     Ok(())
+}
+
+fn truncate_tool_output_content(
+    content: ToolOutputContent,
+    max_bytes: usize,
+    head_bytes: usize,
+    tail_bytes: usize,
+) -> ToolOutputContent {
+    match content {
+        ToolOutputContent::Text(text) => ToolOutputContent::Text(truncate_tool_result(
+            &text, max_bytes, head_bytes, tail_bytes,
+        )),
+        ToolOutputContent::Items(mut parts) => {
+            let text_parts = parts
+                .iter()
+                .filter(|part| matches!(part, ContentPart::Text(_)))
+                .count();
+            if text_parts == 0 {
+                return ToolOutputContent::Items(parts);
+            }
+            let per_part = max_bytes / text_parts;
+            for part in &mut parts {
+                if let ContentPart::Text(text) = part {
+                    *text = truncate_tool_result(text, per_part, head_bytes, tail_bytes);
+                }
+            }
+            ToolOutputContent::Items(parts)
+        }
+    }
 }
 
 fn truncate_tool_result(
@@ -292,7 +315,8 @@ mod tests {
             }),
             ConversationItem::FunctionCallOutput(crate::conversation::FunctionCallOutput {
                 call_id,
-                outcome: ToolOutcome::Success("日本語".repeat(100)),
+                outcome: crate::conversation::ToolOutcome::Success,
+                content: ToolOutputContent::Text("日本語".repeat(100)),
             }),
         ]);
         let mut config = config();
@@ -307,8 +331,9 @@ mod tests {
         let ConversationItem::FunctionCallOutput(output) = &request.conversation.items()[1] else {
             panic!("second item must be Tool output");
         };
-        let ToolOutcome::Success(content) = &output.outcome else {
-            panic!("outcome must remain success");
+        assert_eq!(output.outcome, crate::conversation::ToolOutcome::Success);
+        let ToolOutputContent::Text(content) = &output.content else {
+            panic!("output content must remain text");
         };
         assert!(content.len() <= 128);
         assert!(content.contains("tool result truncated"));

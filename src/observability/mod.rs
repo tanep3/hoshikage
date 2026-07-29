@@ -1,4 +1,4 @@
-use crate::conversation::{ToolArguments, ToolOutcome};
+use crate::conversation::{ToolArguments, ToolOutputContent};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -31,15 +31,9 @@ impl ToolPayloadSummary {
         }
     }
 
-    pub fn from_outcome(outcome: &ToolOutcome, truncated: bool) -> Self {
-        let content = match outcome {
-            ToolOutcome::Success(content)
-            | ToolOutcome::Failure(content)
-            | ToolOutcome::Rejected(content)
-            | ToolOutcome::Cancelled(content) => content,
-        };
+    pub fn from_tool_output(content: &ToolOutputContent, truncated: bool) -> Self {
         Self {
-            bytes: content.len(),
+            bytes: content.encoded_bytes(),
             json_valid: false,
             schema_valid: None,
             truncated,

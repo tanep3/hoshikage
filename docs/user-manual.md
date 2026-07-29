@@ -358,7 +358,7 @@ hoshikage doctor \
   --codex-base-url http://127.0.0.1:3030/v1
 ```
 
-カタログはすべてのBundleを列挙し、`codex_compatible`、context、Responses、streaming、toolsなどを返します。モデルファイルのpathやTokenは出力しません。
+カタログはすべてのBundleを列挙し、`codex_compatible`、context、Responses、streaming、tools、visionなどを返します。モデルファイルのpathやTokenは出力しません。
 
 Tool Callingが`disabled`ならCodexはテキスト応答だけ利用できます。Agent Loopでファイルやshell toolを使うには、Bundleに適切な`native`または`json` modeを設定し、`doctor`で確認してください。
 
@@ -374,7 +374,39 @@ Tool Callingが`disabled`ならCodexはテキスト応答だけ利用できま�
 - `POST /v1/chat/completions`: 既存Chat Completions
 - `POST /v1/responses`: Codex向けResponses API
 
-### 6.2 エラーとrequest ID
+### 6.2 Responses APIへ画像を渡す
+
+Bundleに`mmproj`が設定され、managed llama-serverを使用している場合、Responses APIはJPEGとPNGのData URIを受理します。Codex CLIでは画像fileをBase64へ手動変換する必要はありません。
+
+```bash
+codex exec --profile hoshikage \
+  --image /absolute/path/camera.jpg \
+  "Describe this image briefly."
+```
+
+Hoshikageへ直接送る場合、`input_image.image_url`は`data:image/jpeg;base64,...`または`data:image/png;base64,...`にします。外部URLとlocal file pathはResponses APIでは受理しません。`GET /v1/models`の`input_modalities`に`image`があることを先に確認してください。
+
+不正なBase64、MIME typeと画像内容の不一致、上限超過は`invalid_image`になります。Visionを利用できないBundleは`vision_not_supported`になります。streamingと非streamingで入力条件は同じです。
+
+### 6.3 Codex AgentがToolで画像を読む場合
+
+Codex Agentは、会話の途中で`view_image`を選び、ローカル画像を読み取ることがあります。
+この場合、Codexは画像を`function_call_output`内のContent Item配列としてHoshikageへ返します。
+Hoshikageは`input_text`と`input_image`の混在結果を通常のVision入力と同じ規則で検証し、
+streaming、非streamingのどちらでもモデルへ渡します。利用者による追加設定やBase64変換は
+不要です。
+
+```text
+Codex -> view_image -> function_call_output(input_image)
+      -> Hoshikage Responses API -> Vision Bundle
+```
+
+`view_image`を使うかどうかはCodexと選択されたLLMの判断です。HoshikageはTool定義と結果を
+変換しますが、Toolを実行したり、モデルへTool選択を強制したりしません。Toolを使わない場合は
+BundleのTool能力を確認し、画像の絶対パスと「実際に`view_image`で読み取る」ことを明示して
+ください。それでも選ばない場合はモデルのTool Calling能力による制約です。
+
+### 6.4 エラーとrequest ID
 
 Responses APIはOpenAI互換エラーを返し、`x-request-id` headerを付与します。問い合わせやログ照合では本文やTokenではなくrequest IDを使用してください。
 

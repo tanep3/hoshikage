@@ -833,6 +833,189 @@ mod config_tests {
     }
 }
 
+#[cfg(test)]
+mod vision_request_tests {
+    use super::*;
+    use crate::conversation::{
+        CallId, ContentPart, Conversation, ConversationItem, FunctionCall, FunctionCallOutput,
+        ImageInput, Message, Role, ToolArguments, ToolName, ToolOutcome, ToolOutputContent,
+    };
+    use crate::inference::{ModelRequest, ModelToolSet, SamplingOptions, ToolChoice};
+
+    fn request_with_image() -> ModelRequest {
+        ModelRequest {
+            conversation: Conversation::new(vec![ConversationItem::Message(
+                Message::new(
+                    Role::User,
+                    vec![
+                        ContentPart::Text("Describe this image.".to_string()),
+                        ContentPart::Image(ImageInput {
+                            source: "data:image/jpeg;base64,/9j/2Q==".to_string(),
+                            detail: None,
+                        }),
+                    ],
+                )
+                .unwrap(),
+            )]),
+            tools: ModelToolSet::default(),
+            tool_choice: ToolChoice::None,
+            sampling: SamplingOptions::default(),
+            max_output_tokens: 64,
+            stream: false,
+        }
+    }
+
+    fn request_with_tool_image() -> ModelRequest {
+        let call_id = CallId::new("call_view").unwrap();
+        ModelRequest {
+            conversation: Conversation::new(vec![
+                ConversationItem::FunctionCall(FunctionCall {
+                    call_id: call_id.clone(),
+                    name: ToolName::new("view_image").unwrap(),
+                    arguments: ToolArguments::parse(r#"{"path":"/tmp/capture.jpg"}"#).unwrap(),
+                }),
+                ConversationItem::FunctionCallOutput(FunctionCallOutput {
+                    call_id,
+                    outcome: ToolOutcome::Success,
+                    content: ToolOutputContent::Items(vec![ContentPart::Image(ImageInput {
+                        source: "data:image/jpeg;base64,/9j/2Q==".to_string(),
+                        detail: Some("high".to_string()),
+                    })]),
+                }),
+            ]),
+            tools: ModelToolSet::default(),
+            tool_choice: ToolChoice::None,
+            sampling: SamplingOptions::default(),
+            max_output_tokens: 64,
+            stream: true,
+        }
+    }
+
+    #[test]
+    fn image_request_requires_mmproj_before_runtime_work() {
+        let without_vision =
+            ModelConfig::new_legacy("/models".to_string(), "model.gguf".to_string(), Vec::new());
+        let error = validate_vision_request(&request_with_image(), &without_vision)
+            .expect_err("text-only bundle must reject image input");
+        assert!(matches!(
+            error,
+            crate::error::HoshikageError::VisionNotSupported
+        ));
+
+        let mut with_vision = without_vision;
+        with_vision.mmproj = Some("mmproj.gguf".to_string());
+        assert!(validate_vision_request(&request_with_image(), &with_vision).unwrap());
+    }
+
+    #[test]
+    fn image_returned_by_a_tool_requires_the_same_vision_capability() {
+        let without_vision =
+            ModelConfig::new_legacy("/models".to_string(), "model.gguf".to_string(), Vec::new());
+        let error = validate_vision_request(&request_with_tool_image(), &without_vision)
+            .expect_err("text-only bundle must reject image Tool output");
+        assert!(matches!(
+            error,
+            crate::error::HoshikageError::VisionNotSupported
+        ));
+
+        let mut with_vision = without_vision;
+        with_vision.mmproj = Some("mmproj.gguf".to_string());
+        assert!(validate_vision_request(&request_with_tool_image(), &with_vision).unwrap());
+    }
+
+    #[test]
+    fn context_fallback_does_not_count_base64_image_bytes_as_text_tokens() {
+        let body = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image."},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:image/jpeg;base64,{}", "A".repeat(1_000_000))
+                        }
+                    }
+                ]
+            }]
+        });
+
+        let estimate = conservative_context_request_bytes(&body).unwrap();
+
+        assert!(estimate < 10_000);
+    }
+
+    #[test]
+    fn model_metadata_only_advertises_responses_vision_on_the_supported_runtime() {
+        let mut config =
+            ModelConfig::new_legacy("/models".to_string(), "model.gguf".to_string(), Vec::new());
+        config.mmproj = Some("mmproj.gguf".to_string());
+
+        assert!(
+            HoshikageModelInfo::from_bundle("vision".to_string(), config.clone(), 4_096, true,)
+                .vision
+        );
+        assert!(
+            !HoshikageModelInfo::from_bundle("vision".to_string(), config, 4_096, false,).vision
+        );
+    }
+}
+
+fn validate_vision_request(request: &ModelRequest, config: &ModelConfig) -> Result<bool> {
+    let has_image = request.conversation.items().iter().any(|item| match item {
+        crate::conversation::ConversationItem::Message(message) => message
+            .content
+            .iter()
+            .any(|part| matches!(part, crate::conversation::ContentPart::Image(_))),
+        crate::conversation::ConversationItem::FunctionCallOutput(output) => {
+            output.content.contains_image()
+        }
+        crate::conversation::ConversationItem::FunctionCall(_) => false,
+    });
+    if has_image && config.mmproj.is_none() {
+        return Err(crate::error::HoshikageError::VisionNotSupported);
+    }
+    Ok(has_image)
+}
+
+fn conservative_context_request_bytes(body: &serde_json::Value) -> Result<usize> {
+    const IMAGE_TOKEN_BUDGET: usize = 4_096;
+
+    fn replace_image_data(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    replace_image_data(value);
+                }
+            }
+            serde_json::Value::Object(object) => {
+                if object.get("type").and_then(serde_json::Value::as_str) == Some("image_url") {
+                    if let Some(url) = object
+                        .get_mut("image_url")
+                        .and_then(serde_json::Value::as_object_mut)
+                        .and_then(|image_url| image_url.get_mut("url"))
+                    {
+                        if url
+                            .as_str()
+                            .is_some_and(|source| source.starts_with("data:image/"))
+                        {
+                            *url = serde_json::Value::String("I".repeat(IMAGE_TOKEN_BUDGET));
+                        }
+                    }
+                }
+                for value in object.values_mut() {
+                    replace_image_data(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut estimate = body.clone();
+    replace_image_data(&mut estimate);
+    Ok(serde_json::to_vec(&estimate)?.len())
+}
+
 struct InferenceState {
     backend: Option<Box<dyn RuntimeBackend>>,
     managed_server: Option<LlamaServerProcess>,
@@ -921,7 +1104,12 @@ impl From<LoadedRuntimeInfo> for LoadedRuntimeInfoSnapshot {
 }
 
 impl HoshikageModelInfo {
-    fn from_bundle(id: String, config: ModelConfig, default_context_window: u32) -> Self {
+    fn from_bundle(
+        id: String,
+        config: ModelConfig,
+        default_context_window: u32,
+        responses_vision_enabled: bool,
+    ) -> Self {
         Self {
             id,
             context_window: crate::codex::effective_context_window(&config, default_context_window),
@@ -932,7 +1120,7 @@ impl HoshikageModelInfo {
                 == crate::model::ToolCallingMode::Json,
             tools: config.tool_calling.mode != crate::model::ToolCallingMode::Disabled,
             main_model_configured: !config.model.is_empty(),
-            vision: config.mmproj.is_some(),
+            vision: responses_vision_enabled && config.mmproj.is_some(),
             mmproj_configured: config.mmproj.is_some(),
             mtp_configured: config.speculation.has_mode(SpeculationMode::Mtp),
             draft_model_configured: config.speculation.has_mode(SpeculationMode::DraftModel)
@@ -1091,9 +1279,17 @@ impl ModelManager {
 
     pub async fn list_hoshikage_models(&self) -> Vec<HoshikageModelInfo> {
         let models = self.registry.snapshot().await;
+        let responses_vision_enabled = self.uses_managed_llama_server();
         let mut data = models
             .into_iter()
-            .map(|(name, config)| HoshikageModelInfo::from_bundle(name, config, self.config.n_ctx))
+            .map(|(name, config)| {
+                HoshikageModelInfo::from_bundle(
+                    name,
+                    config,
+                    self.config.n_ctx,
+                    responses_vision_enabled,
+                )
+            })
             .collect::<Vec<_>>();
         data.sort_by(|a, b| a.id.cmp(&b.id));
         data
@@ -1105,7 +1301,18 @@ impl ModelManager {
             name.to_string(),
             config,
             self.config.n_ctx,
+            self.uses_managed_llama_server(),
         ))
+    }
+
+    pub async fn responses_vision_available(&self) -> bool {
+        self.uses_managed_llama_server()
+            && self
+                .registry
+                .snapshot()
+                .await
+                .values()
+                .any(|config| config.mmproj.is_some())
     }
 
     pub fn runtime_status(&self) -> RuntimeStatusSnapshot {
@@ -1513,6 +1720,10 @@ impl ModelManager {
         mut request: ModelRequest,
     ) -> Result<ModelCompletion> {
         let model_config = self.get_model(model.as_str()).await?;
+        let has_vision_input = validate_vision_request(&request, &model_config)?;
+        if has_vision_input && !self.uses_managed_llama_server() {
+            return Err(crate::error::HoshikageError::VisionNotSupported);
+        }
         validate_tool_request(&request, &model_config)?;
         apply_tool_result_policy(&mut request, &model_config)?;
         if !request.tools.tools().is_empty() {
@@ -1651,6 +1862,10 @@ impl ModelManager {
         use futures_util::StreamExt;
 
         let model_config = self.get_model(model.as_str()).await?;
+        let has_vision_input = validate_vision_request(&request, &model_config)?;
+        if has_vision_input && !self.uses_managed_llama_server() {
+            return Err(crate::error::HoshikageError::VisionNotSupported);
+        }
         request.stream = true;
         validate_tool_request(&request, &model_config)?;
         apply_tool_result_policy(&mut request, &model_config)?;
@@ -1976,7 +2191,7 @@ impl ModelManager {
             input_tokens: u32,
         }
 
-        let request_bytes = serde_json::to_vec(body)?.len();
+        let request_bytes = conservative_context_request_bytes(body)?;
         let response = self
             .llama_server_client
             .chat_input_tokens(lease.endpoint(), body)

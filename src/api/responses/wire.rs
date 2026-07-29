@@ -2,8 +2,10 @@ use crate::config::UnknownFieldPolicy;
 use crate::conversation::{
     CallId, ContentPart, Conversation, ConversationError, ConversationItem, FunctionCall,
     FunctionCallOutput, Message, ModelId, Role, ToolArguments, ToolName, ToolOutcome,
+    ToolOutputContent,
 };
 use crate::inference::{ModelTool, ModelToolSet, SamplingOptions, TokenUsage, ToolChoice};
+use base64::Engine;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeSet, HashSet};
@@ -341,7 +343,7 @@ fn normalize_input(
                 let content = object
                     .get("content")
                     .ok_or_else(|| invalid("message content is required", Some("input")))?;
-                let content = normalize_message_content(content)?;
+                let content = normalize_message_content(content, limits)?;
                 items.push(ConversationItem::Message(
                     Message::new(role, content)
                         .map_err(|_| invalid("message content is invalid", Some("input")))?,
@@ -429,21 +431,31 @@ fn normalize_function_call_output(
         })?;
     let output = object
         .get("output")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            invalid(
-                "function_call_output output must be a string",
-                Some("input"),
-            )
-        })?
-        .to_string();
-    if output.len() > limits.max_tool_result_bytes {
-        return Err(WireRequestError {
-            code: "context_length_exceeded",
-            param: Some("input".to_string()),
-            message: "function_call_output exceeds the configured size limit".to_string(),
-        });
-    }
+        .ok_or_else(|| invalid("function_call_output output is required", Some("input")))?;
+    let content = if let Some(text) = output.as_str() {
+        if text.len() > limits.max_tool_result_bytes {
+            return Err(tool_result_too_large());
+        }
+        ToolOutputContent::Text(text.to_string())
+    } else if output.is_array() {
+        let parts = normalize_message_content(output, limits)?;
+        let text_bytes = parts
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text(text) => Some(text.len()),
+                ContentPart::Image(_) => None,
+            })
+            .sum::<usize>();
+        if text_bytes > limits.max_tool_result_bytes {
+            return Err(tool_result_too_large());
+        }
+        ToolOutputContent::Items(parts)
+    } else {
+        return Err(invalid(
+            "function_call_output output must be a string or content item array",
+            Some("input"),
+        ));
+    };
     let status = object
         .get("status")
         .map(|value| {
@@ -456,10 +468,10 @@ fn normalize_function_call_output(
         })
         .transpose()?;
     let outcome = match status {
-        None | Some("completed" | "success") => ToolOutcome::Success(output),
-        Some("failed" | "error") => ToolOutcome::Failure(output),
-        Some("rejected") => ToolOutcome::Rejected(output),
-        Some("cancelled") => ToolOutcome::Cancelled(output),
+        None | Some("completed" | "success") => ToolOutcome::Success,
+        Some("failed" | "error") => ToolOutcome::Failure,
+        Some("rejected") => ToolOutcome::Rejected,
+        Some("cancelled") => ToolOutcome::Cancelled,
         Some(_) => {
             return Err(invalid(
                 "function_call_output status is invalid",
@@ -467,10 +479,25 @@ fn normalize_function_call_output(
             ));
         }
     };
-    Ok(FunctionCallOutput { call_id, outcome })
+    Ok(FunctionCallOutput {
+        call_id,
+        outcome,
+        content,
+    })
 }
 
-fn normalize_message_content(content: &Value) -> Result<Vec<ContentPart>, WireRequestError> {
+fn tool_result_too_large() -> WireRequestError {
+    WireRequestError {
+        code: "context_length_exceeded",
+        param: Some("input".to_string()),
+        message: "function_call_output exceeds the configured size limit".to_string(),
+    }
+}
+
+fn normalize_message_content(
+    content: &Value,
+    limits: crate::application::ResponsesRequestLimits,
+) -> Result<Vec<ContentPart>, WireRequestError> {
     if let Some(text) = content.as_str() {
         return Ok(vec![ContentPart::Text(text.to_string())]);
     }
@@ -492,16 +519,90 @@ fn normalize_message_content(content: &Value) -> Result<Vec<ContentPart>, WireRe
                     .and_then(Value::as_str)
                     .map(|text| ContentPart::Text(text.to_string()))
                     .ok_or_else(|| invalid("text content is required", Some("input"))),
-                Some("input_image") => Err(WireRequestError {
-                    code: "unsupported_parameter",
-                    param: Some("input".to_string()),
-                    message: "Image input is not available in the text-only Responses phase"
-                        .to_string(),
-                }),
+                Some("input_image") => normalize_input_image(object, limits.max_image_bytes),
                 _ => Err(invalid("unsupported content part type", Some("input"))),
             }
         })
         .collect()
+}
+
+fn normalize_input_image(
+    object: &serde_json::Map<String, Value>,
+    max_image_bytes: usize,
+) -> Result<ContentPart, WireRequestError> {
+    let image_url = object
+        .get("image_url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_image("input_image image_url must be a string"))?;
+    let detail = object
+        .get("detail")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|detail| matches!(*detail, "auto" | "low" | "high" | "original"))
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    invalid_image("input_image detail must be auto, low, high, or original")
+                })
+        })
+        .transpose()?;
+    let data_url = image_url
+        .strip_prefix("data:")
+        .ok_or_else(|| invalid_image("input_image image_url must be a data URL"))?;
+    let (metadata, encoded) = data_url
+        .split_once(',')
+        .ok_or_else(|| invalid_image("image data URL must contain a comma separator"))?;
+    let mut metadata_parts = metadata.split(';');
+    let media_type = metadata_parts
+        .next()
+        .ok_or_else(|| invalid_image("image data URL media type is missing"))?;
+    let canonical_media_type = match media_type {
+        "image/jpeg" | "image/jpg" => "image/jpeg",
+        "image/png" => "image/png",
+        _ => {
+            return Err(invalid_image(format!(
+                "unsupported image media type: {media_type}"
+            )));
+        }
+    };
+    if !metadata_parts.any(|part| part == "base64") {
+        return Err(invalid_image("image data URL must be base64 encoded"));
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| invalid_image("image data URL contains invalid base64 data"))?;
+    if decoded.is_empty() {
+        return Err(invalid_image("image data must not be empty"));
+    }
+    if decoded.len() > max_image_bytes {
+        return Err(invalid_image(format!(
+            "decoded image exceeds the configured {max_image_bytes} byte limit"
+        )));
+    }
+    let signature_matches = match canonical_media_type {
+        "image/jpeg" => decoded.starts_with(&[0xff, 0xd8, 0xff]),
+        "image/png" => decoded.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]),
+        _ => false,
+    };
+    if !signature_matches {
+        return Err(invalid_image(format!(
+            "image content does not match {canonical_media_type}"
+        )));
+    }
+    let canonical_data = base64::engine::general_purpose::STANDARD.encode(decoded);
+    Ok(ContentPart::Image(crate::conversation::ImageInput {
+        source: format!("data:{canonical_media_type};base64,{canonical_data}"),
+        detail,
+    }))
+}
+
+fn invalid_image(message: impl Into<String>) -> WireRequestError {
+    WireRequestError {
+        code: "invalid_image",
+        param: Some("input".to_string()),
+        message: message.into(),
+    }
 }
 
 fn normalize_tools(
@@ -838,6 +939,84 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_and_png_input_images_normalize_with_text_in_original_order() {
+        for (media_type, data) in [("image/jpeg", "/9j/2Q=="), ("image/png", "iVBORw0KGgo=")] {
+            let decoded = decode_request(
+                serde_json::json!({
+                    "model": "gemma4",
+                    "input": [{
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Describe this image."},
+                            {
+                                "type": "input_image",
+                                "image_url": format!("data:{media_type};base64,{data}"),
+                                "detail": "high"
+                            }
+                        ]
+                    }]
+                }),
+                UnknownFieldPolicy::Compatible,
+            )
+            .unwrap();
+
+            let ConversationItem::Message(message) = &decoded.conversation.items()[0] else {
+                panic!("input must normalize to one message");
+            };
+            assert!(matches!(
+                &message.content[0],
+                ContentPart::Text(text) if text == "Describe this image."
+            ));
+            let ContentPart::Image(image) = &message.content[1] else {
+                panic!("second content part must be an image");
+            };
+            assert_eq!(image.source, format!("data:{media_type};base64,{data}"));
+            assert_eq!(image.detail.as_deref(), Some("high"));
+        }
+    }
+
+    #[test]
+    fn malformed_or_mismatched_input_images_are_rejected_safely() {
+        for (image_url, expected_message) in [
+            (
+                "data:image/jpeg;base64,not***base64",
+                "image data URL contains invalid base64 data",
+            ),
+            (
+                "data:image/gif;base64,R0lGODlh",
+                "unsupported image media type",
+            ),
+            (
+                "data:image/png;base64,/9j/2Q==",
+                "image content does not match image/png",
+            ),
+        ] {
+            let error = match decode_request(
+                serde_json::json!({
+                    "model": "gemma4",
+                    "input": [{
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_image",
+                            "image_url": image_url
+                        }]
+                    }]
+                }),
+                UnknownFieldPolicy::Compatible,
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("invalid image input must fail"),
+            };
+
+            assert_eq!(error.code, "invalid_image");
+            assert_eq!(error.param.as_deref(), Some("input"));
+            assert!(error.message.contains(expected_message));
+        }
+    }
+
+    #[test]
     fn function_tools_and_named_choice_normalize_to_domain_contract() {
         let decoded = decode_request(
             serde_json::json!({
@@ -899,10 +1078,112 @@ mod tests {
         let ConversationItem::FunctionCallOutput(output) = &decoded.conversation.items()[1] else {
             panic!("second item must be function_call_output");
         };
+        assert_eq!(output.outcome, ToolOutcome::Success);
         assert!(matches!(
-            output.outcome,
-            ToolOutcome::Success(ref content) if content == "Hoshikage"
+            output.content,
+            crate::conversation::ToolOutputContent::Text(ref content)
+                if content == "Hoshikage"
         ));
+    }
+
+    #[test]
+    fn function_call_output_accepts_multimodal_content_items() {
+        for (media_type, encoded, detail) in [
+            ("image/jpeg", "/9j/2Q==", "high"),
+            ("image/png", "iVBORw0KGgo=", "original"),
+        ] {
+            let decoded = decode_request(
+                serde_json::json!({
+                    "model": "gemma4",
+                    "input": [
+                        {
+                            "type": "function_call",
+                            "call_id": "call_view",
+                            "name": "view_image",
+                            "arguments": "{\"path\":\"/tmp/capture\"}"
+                        },
+                        {
+                            "type": "function_call_output",
+                            "call_id": "call_view",
+                            "output": [
+                                {"type": "input_text", "text": "Captured image"},
+                                {
+                                    "type": "input_image",
+                                    "image_url": format!(
+                                        "data:{media_type};base64,{encoded}"
+                                    ),
+                                    "detail": detail
+                                }
+                            ]
+                        }
+                    ]
+                }),
+                UnknownFieldPolicy::Compatible,
+            )
+            .unwrap();
+
+            let ConversationItem::FunctionCallOutput(output) = &decoded.conversation.items()[1]
+            else {
+                panic!("second item must be function_call_output");
+            };
+            assert_eq!(output.outcome, ToolOutcome::Success);
+            let crate::conversation::ToolOutputContent::Items(parts) = &output.content else {
+                panic!("array output must remain content items");
+            };
+            assert!(matches!(
+                &parts[0],
+                ContentPart::Text(text) if text == "Captured image"
+            ));
+            let ContentPart::Image(image) = &parts[1] else {
+                panic!("second output content item must be an image");
+            };
+            assert_eq!(image.source, format!("data:{media_type};base64,{encoded}"));
+            assert_eq!(image.detail.as_deref(), Some(detail));
+        }
+    }
+
+    #[test]
+    fn function_call_output_image_reuses_standard_image_validation() {
+        for (image_url, expected_message) in [
+            (
+                "data:image/jpeg;base64,not***base64",
+                "image data URL contains invalid base64 data",
+            ),
+            (
+                "data:image/gif;base64,R0lGODlh",
+                "unsupported image media type",
+            ),
+        ] {
+            let error = match decode_request(
+                serde_json::json!({
+                    "model": "gemma4",
+                    "input": [
+                        {
+                            "type": "function_call",
+                            "call_id": "call_view",
+                            "name": "view_image",
+                            "arguments": "{\"path\":\"/tmp/capture\"}"
+                        },
+                        {
+                            "type": "function_call_output",
+                            "call_id": "call_view",
+                            "output": [{
+                                "type": "input_image",
+                                "image_url": image_url
+                            }]
+                        }
+                    ]
+                }),
+                UnknownFieldPolicy::Compatible,
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("invalid Tool image output must fail"),
+            };
+
+            assert_eq!(error.code, "invalid_image");
+            assert_eq!(error.param.as_deref(), Some("input"));
+            assert!(error.message.contains(expected_message));
+        }
     }
 
     #[test]
@@ -942,10 +1223,10 @@ mod tests {
                 panic!("second item must be function_call_output");
             };
             let actual = match output.outcome {
-                ToolOutcome::Success(_) => "success",
-                ToolOutcome::Failure(_) => "failure",
-                ToolOutcome::Rejected(_) => "rejected",
-                ToolOutcome::Cancelled(_) => "cancelled",
+                ToolOutcome::Success => "success",
+                ToolOutcome::Failure => "failure",
+                ToolOutcome::Rejected => "rejected",
+                ToolOutcome::Cancelled => "cancelled",
             };
             assert_eq!(actual, expected, "status={status}");
         }
