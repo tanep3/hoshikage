@@ -71,6 +71,22 @@ Existing models with an external MTP drafter continue to use
 `--mtp-drafter /models/mtp.gguf`. `--spec-draft-n-max` cannot be used by itself. Check the
 Bundle-specific value with `hoshikage list --details` or `GET /v1/hoshikage/models`.
 
+Diffusion LLMs use a different generation algorithm from ordinary autoregressive models. Register
+them with `--diffusion`. This flag is not a performance tuning option. Even when the global setting
+is `HOSHIKAGE_RUNTIME_BACKEND=llama-server-managed`, Hoshikage routes only that Bundle through the
+existing Diffusion FFI path. Do not use this flag for ordinary models.
+
+```bash
+hoshikage add /models/elyza/ELYZA-Diffusion.gguf elyza-diffusion \
+  --diffusion \
+  --n-ctx 10240
+```
+
+When `max_output_tokens`, or Chat Completions `max_tokens`, is omitted, Hoshikage does not inject an
+arbitrary 1024- or 4096-token limit. The managed runtime receives no explicit limit. The FFI runtime
+uses the Bundle context remaining after the input. An explicitly supplied limit is still validated
+against the Bundle context.
+
 ### 2.2 Bundle diagnostics
 
 ```bash

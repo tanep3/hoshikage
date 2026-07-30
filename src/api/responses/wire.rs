@@ -279,17 +279,19 @@ pub fn decode_request_with_limits(
                     Some("max_output_tokens"),
                 )
             })?;
-            u32::try_from(value)
-                .ok()
-                .filter(|value| *value > 0)
-                .ok_or_else(|| {
-                    invalid(
-                        "max_output_tokens must be a positive 32-bit integer",
-                        Some("max_output_tokens"),
-                    )
-                })?
+            Some(
+                u32::try_from(value)
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| {
+                        invalid(
+                            "max_output_tokens must be a positive 32-bit integer",
+                            Some("max_output_tokens"),
+                        )
+                    })?,
+            )
         }
-        None => 1024,
+        None => None,
     };
     let stream = object
         .get("stream")
@@ -847,7 +849,7 @@ mod tests {
         assert_eq!(decoded.conversation.summary().messages, 2);
         assert_eq!(decoded.sampling.temperature, Some(0.1));
         assert_eq!(decoded.sampling.top_p, Some(0.9));
-        assert_eq!(decoded.max_output_tokens, 64);
+        assert_eq!(decoded.max_output_tokens, Some(64));
     }
 
     #[test]
@@ -902,7 +904,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(decoded.conversation.summary().messages, 1);
-        assert_eq!(decoded.max_output_tokens, 1024);
+        assert_eq!(decoded.max_output_tokens, None);
         assert_eq!(decoded.sampling, SamplingOptions::default());
     }
 

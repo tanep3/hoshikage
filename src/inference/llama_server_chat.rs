@@ -65,10 +65,12 @@ pub fn build_chat_request(
         "stream": request.stream,
         "temperature": request.sampling.temperature.unwrap_or(defaults.temperature),
         "top_p": request.sampling.top_p.unwrap_or(defaults.top_p),
-        "max_tokens": request.max_output_tokens,
         "repeat_penalty": defaults.repeat_penalty,
         "stop": stop,
     });
+    if let Some(max_output_tokens) = request.max_output_tokens {
+        body["max_tokens"] = serde_json::json!(max_output_tokens);
+    }
     if model_config.thinking.mode == ThinkingMode::Off {
         body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
     }
@@ -289,7 +291,7 @@ mod tests {
             tools: ModelToolSet::default(),
             tool_choice: ToolChoice::None,
             sampling: SamplingOptions::default(),
-            max_output_tokens: 64,
+            max_output_tokens: Some(64),
             stream: false,
         }
     }
@@ -326,7 +328,7 @@ mod tests {
             }]),
             tool_choice: ToolChoice::Auto,
             sampling: SamplingOptions::default(),
-            max_output_tokens: 64,
+            max_output_tokens: Some(64),
             stream: false,
         }
     }
@@ -361,6 +363,28 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn adapter_omits_max_tokens_when_the_client_does_not_set_a_limit() {
+        let config =
+            ModelConfig::new_legacy("/models".to_string(), "model.gguf".to_string(), Vec::new());
+        let mut request = request();
+        request.max_output_tokens = None;
+
+        let body = build_chat_request(
+            &ModelId::new("gemma4").unwrap(),
+            &request,
+            &config,
+            &LlamaServerChatDefaults {
+                temperature: 0.2,
+                top_p: 0.8,
+                repeat_penalty: 1.1,
+            },
+        )
+        .unwrap();
+
+        assert!(body.get("max_tokens").is_none());
     }
 
     #[test]

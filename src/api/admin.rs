@@ -1,5 +1,6 @@
 use crate::model::{
-    ModelConfig, SpeculationConfig, SpeculationMode, ThinkingConfig, ToolCallingConfig,
+    GenerationMode, ModelConfig, SpeculationConfig, SpeculationMode, ThinkingConfig,
+    ToolCallingConfig,
 };
 use axum::{
     extract::{Path, State},
@@ -22,6 +23,8 @@ pub struct AddModelRequest {
     pub speculation: SpeculationConfig,
     #[serde(default)]
     pub thinking: ThinkingConfig,
+    #[serde(default)]
+    pub generation: GenerationMode,
     #[serde(
         default,
         skip_serializing_if = "ToolCallingConfig::is_disabled_default"
@@ -75,6 +78,7 @@ pub async fn add_model(
         drafter: req.drafter,
         speculation,
         thinking: req.thinking,
+        generation: req.generation,
         tool_calling: req.tool_calling,
         n_ctx: req.n_ctx,
         n_gpu_layers: req.n_gpu_layers,
@@ -172,6 +176,7 @@ mod tests {
             thinking: ThinkingConfig {
                 mode: ThinkingMode::Off,
             },
+            generation: GenerationMode::Autoregressive,
             tool_calling: ToolCallingConfig::default(),
             n_ctx: Some(8192),
             n_gpu_layers: Some(-1),

@@ -167,6 +167,14 @@ Hoshikage は、単一 GGUF ファイルではなく、推論に必要なファ�
 **方針:**
 - `.env` はサーバー全体の既定値を扱う。
 - モデルごとの設定は `model_map.json` に保持する。
+- モデル、chat template、推論方式または用途によって変わる `llama-server`
+  option は、モデル名による分岐ではなく Model Bundle の型付き設定として保持する。
+- 待受 address、認証、内部 port、runtime binary、log 保存先など、モデルに依存しない
+  process / service 設定は `model_map.json` に保持しない。
+- temperature や最大出力 token 数などリクエストで指定可能な値は API request を優先し、
+  Model Bundle にはモデル別の既定値だけを保持できる。
+- 任意文字列をそのまま `llama-server` へ渡すことを標準方式とせず、Hoshikage が
+  検証可能な型付き field から起動 option / request parameter へ変換する。
 - DB 管理は今回の要件には含めない。
 - 既存の `path` / `model` / `stop` 形式は後方互換として維持する。
 
@@ -179,13 +187,19 @@ Hoshikage は、単一 GGUF ファイルではなく、推論に必要なファ�
 - `n_gpu_layers`: モデル別 GPU offload 設定
 - `vision`: Vision 入力を許可するか
 - `speculation`: MTP / Draft model / draft token上限 / fallback mode
-- `thinking`: Thinking mode 制御
+- `thinking`: Thinking mode、reasoning token上限、最終回答予約量
 - `chat_template`: 必要に応じた chat template 指定
+- `generation`: Autoregressive / Diffusion の推論方式
+- `llama_server`: KV cache、thread、batch など対応済みモデル別 runtime option
 
 **受け入れ条件:**
 - 既存の `hoshikage add <PATH> <LABEL> [STOP_WORDS]...` は従来通り動作する。
-- 新しい CLI または管理 API で、`mmproj`、`draft_model`、内蔵MTP、`spec_draft_n_max`、`speculation`、`thinking`、`n_ctx`、`n_gpu_layers` を登録できる。
-- `hoshikage add` は `--mmproj`, `--mtp`, `--mtp-drafter`, `--draft-model`, `--spec-draft-n-max`, `--thinking-off`, `--n-ctx`, `--n-gpu-layers` を受け付ける。
+- 新しい CLI または管理 API で、`mmproj`、`draft_model`、内蔵MTP、
+  `spec_draft_n_max`、`speculation`、`thinking`、`n_ctx`、`n_gpu_layers`、
+  推論方式および対応済みモデル別 runtime option を登録できる。
+- `hoshikage add` は `--mmproj`, `--mtp`, `--mtp-drafter`, `--draft-model`,
+  `--spec-draft-n-max`, `--thinking-mode`, `--max-reasoning-tokens`,
+  `--min-final-tokens`, `--thinking-off`, `--n-ctx`, `--n-gpu-layers` を受け付ける。
 - `speculation.draft_n_max`は0より大きい整数とし、speculation modeが有効なBundleにだけ指定できる。
 - `draft_n_max`未指定時は、利用するllama-server runtimeの既定値を変更しない。
 - MTP と Draft model の同時指定は llama.cpp runtime の対応に準拠する。Hoshikage は独自制限を設けず、`llama-server` が受け付けない組み合わせは `doctor` / 起動時診断で明示する。
@@ -417,17 +431,43 @@ Hoshikage は、現在の runtime 状態とモデル能力を API から確認�
 
 **優先度:** 高
 
-Hoshikage は、音声会話 BOT など低レイテンシが重要な用途向けに、モデルごとに Thinking mode を無効化できる。
+Hoshikage は、通常ChatではThinking On、バッチ処理や低レイテンシ用途では
+Thinking Offといった用途差を、モデルごとのBundle設定として管理できる。
 
 **方針:**
-- CLI のユーザー向け option は `--thinking-off` のみ追加する。
-- `--thinking-off` が指定された場合、Model Bundle に `thinking.mode = "off"` を保存する。
-- `--thinking-off` が指定されない場合は `thinking.mode = "auto"` とみなし、モデル・chat template・runtime の既定動作に任せる。
-- `--thinking-on` は追加しない。
-- `thinking_budget_tokens` などの詳細値はユーザーに通常指定させず、runtime backend 側の実装詳細として扱う。
+- Thinking設定はruntime backendの隠れた固定値にせず、Model Bundleが宣言する。
+- `thinking.mode` は `auto`、`on`、`off` を取る。
+- `thinking.max_reasoning_tokens` は正の整数または上限なしを指定できる。
+- `thinking.min_final_tokens` は0以上の整数とし、有限なcontext内で最終回答用に
+  予約する最小token数を表す。最終回答自体の最大長ではない。
+- `max_reasoning_tokens` と `min_final_tokens` はモデル、chat templateおよび用途ごとに
+  異なるため、Hoshikage全体の固定値やモデル名判定として実装しない。
+- 新規のThinking On Bundleでは、登録時に省略した場合の製品既定値として
+  `max_reasoning_tokens = 32768`、`min_final_tokens = 8192` を使用する。
+  これらはモデル固有の推奨値ではなく、CLI / 管理APIで上書き可能な運用既定値とする。
+- `max_reasoning_tokens = unlimited` は固定上限を設けないことを表す。ただし
+  `min_final_tokens` が正数の場合、context枯渇を防ぐための有効上限は動的に適用する。
+- API requestが明示した最大出力token数と、入力後に残るcontextの小さい方を
+  そのrequestの生成可能量とする。
+- 有効reasoning上限は、設定された上限と
+  `生成可能量 - min_final_tokens` の小さい方とする。上限なしの場合も
+  `min_final_tokens` の予約は維持する。
+- `--thinking-mode auto|on|off`、`--max-reasoning-tokens <N|unlimited>`、
+  `--min-final-tokens <N>` で登録できる。
+- 既存の `--thinking-off` は `--thinking-mode off` の後方互換aliasとして維持する。
+- Thinking Off Bundleでは reasoning budget 0相当をruntimeへ適用する。
+- 未指定の既存Bundleは `thinking.mode = "auto"` とし、従来動作を維持する。
 
 **受け入れ条件:**
 - `hoshikage add /path/to/model.gguf label --thinking-off` で Thinking 無効モデルとして登録できる。
+- `hoshikage add /path/to/model.gguf label --thinking-mode on
+  --max-reasoning-tokens unlimited --min-final-tokens 8192` で、reasoningを固定長に
+  制限せず最終回答領域を確保するBundleを登録できる。
+- `hoshikage list --details` と管理APIで、Thinking mode、reasoning上限、
+  最終回答予約量を確認できる。
+- 不正な組み合わせ、負数、context以上の予約量は登録時または起動前診断で明示エラーになる。
+- runtimeが正数のreasoning budgetを扱えない場合は黙って無視せず、
+  `doctor`、起動logまたはAPI errorで判別できる。
 - `thinking.mode = "off"` の場合、Gemma 系モデルでは Thinking を有効化する control token を挿入しない。
 - llama.cpp runtime が reasoning budget を扱える場合、Thinking off に相当する runtime 設定を適用する。
 - llama.cpp runtime が Thinking off 相当の runtime option を提供しない場合、Hoshikage は警告を記録して prompt / template policy と safety filter で続行する。

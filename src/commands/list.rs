@@ -161,6 +161,7 @@ fn print_model_details(name: &str, config: &crate::model::ModelConfig) {
         println!("    spec_draft_n_max: {}", draft_n_max);
     }
     println!("    thinking: {:?}", config.thinking.mode);
+    println!("    generation: {:?}", config.generation);
     if let Some(n_ctx) = config.n_ctx {
         println!("    n_ctx: {}", n_ctx);
     }

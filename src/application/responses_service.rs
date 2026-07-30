@@ -49,7 +49,7 @@ pub struct NormalizedResponsesRequest {
     pub tools: ModelToolSet,
     pub tool_choice: ToolChoice,
     pub sampling: SamplingOptions,
-    pub max_output_tokens: u32,
+    pub max_output_tokens: Option<u32>,
     pub stream: bool,
     pub warnings: Vec<String>,
 }
@@ -581,7 +581,7 @@ mod tests {
             tools: ModelToolSet::default(),
             tool_choice: ToolChoice::None,
             sampling: SamplingOptions::default(),
-            max_output_tokens: 64,
+            max_output_tokens: Some(64),
             stream: false,
             warnings: Vec::new(),
         }

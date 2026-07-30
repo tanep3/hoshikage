@@ -49,6 +49,8 @@ enum Commands {
         spec_draft_n_max: Option<NonZeroU32>,
         #[arg(long)]
         thinking_off: bool,
+        #[arg(long)]
+        diffusion: bool,
         #[arg(long, value_name = "N")]
         n_ctx: Option<u32>,
         #[arg(long, value_name = "N", allow_hyphen_values = true)]
@@ -168,6 +170,7 @@ async fn main() -> hoshikage::Result<()> {
                 draft_model,
                 spec_draft_n_max,
                 thinking_off,
+                diffusion,
                 n_ctx,
                 n_gpu_layers,
                 check,
@@ -182,6 +185,7 @@ async fn main() -> hoshikage::Result<()> {
                     draft_model,
                     spec_draft_n_max,
                     thinking_off,
+                    diffusion,
                     n_ctx,
                     n_gpu_layers,
                     check,

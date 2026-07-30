@@ -4,8 +4,8 @@ use crate::{
     commands::doctor::check_candidate_model,
     config::Config,
     model::{
-        FallbackMode, ModelConfig, ModelRegistry, SpeculationConfig, SpeculationMode,
-        ThinkingConfig, ThinkingMode, ToolCallingConfig,
+        FallbackMode, GenerationMode, ModelConfig, ModelRegistry, SpeculationConfig,
+        SpeculationMode, ThinkingConfig, ThinkingMode, ToolCallingConfig,
     },
 };
 use reqwest::Client;
@@ -27,6 +27,8 @@ struct AddModelRequest {
     pub speculation: SpeculationConfig,
     #[serde(default)]
     pub thinking: ThinkingConfig,
+    #[serde(default)]
+    pub generation: GenerationMode,
     #[serde(
         default,
         skip_serializing_if = "ToolCallingConfig::is_disabled_default"
@@ -54,6 +56,7 @@ pub struct AddModelOptions {
     pub draft_model: Option<String>,
     pub spec_draft_n_max: Option<NonZeroU32>,
     pub thinking_off: bool,
+    pub diffusion: bool,
     pub n_ctx: Option<u32>,
     pub n_gpu_layers: Option<i32>,
     pub check: bool,
@@ -91,6 +94,7 @@ async fn add_via_api(
         drafter: config.drafter,
         speculation: config.speculation,
         thinking: config.thinking,
+        generation: config.generation,
         tool_calling: config.tool_calling,
         n_ctx: config.n_ctx,
         n_gpu_layers: config.n_gpu_layers,
@@ -165,6 +169,7 @@ pub async fn add_model(options: AddModelOptions) -> Result<()> {
         draft_model,
         spec_draft_n_max,
         thinking_off,
+        diffusion,
         n_ctx,
         n_gpu_layers,
         check,
@@ -205,6 +210,11 @@ pub async fn add_model(options: AddModelOptions) -> Result<()> {
             } else {
                 ThinkingMode::Auto
             },
+        },
+        generation: if diffusion {
+            GenerationMode::Diffusion
+        } else {
+            GenerationMode::Autoregressive
         },
         n_ctx,
         n_gpu_layers,

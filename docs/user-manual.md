@@ -71,6 +71,22 @@ hoshikage add /models/qwen/Qwen3.5-9B.gguf qwen3.5-9b-mtp \
 `--spec-draft-n-max`だけを指定することはできません。`hoshikage list --details`と
 `GET /v1/hoshikage/models`でBundleごとの設定値を確認できます。
 
+Diffusion LLMは通常のautoregressiveモデルと生成アルゴリズムが異なるため、
+`--diffusion`を付けて登録します。この指定は速度調整ではありません。全体設定が
+`HOSHIKAGE_RUNTIME_BACKEND=llama-server-managed`でも、該当Bundleだけ既存の
+Diffusion FFI経路へ自動的に切り替わります。通常モデルには指定しないでください。
+
+```bash
+hoshikage add /models/elyza/ELYZA-Diffusion.gguf elyza-diffusion \
+  --diffusion \
+  --n-ctx 10240
+```
+
+`max_output_tokens`またはChat Completionsの`max_tokens`を省略した場合、Hoshikageは
+1024や4096などの固定上限を補いません。managed runtimeでは上流runtimeへ未指定のまま
+渡し、FFI runtimeでは入力後に残るBundle contextを上限として使用します。明示指定した
+値はBundle contextを超えないか検証されます。
+
 ### 2.2 Bundle診断
 
 ```bash

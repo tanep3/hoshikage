@@ -8,7 +8,7 @@ pub enum UnknownFieldPolicy {
     Strict,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeBackendKind {
     LlamaServerManaged,
     LlamaFfi,
