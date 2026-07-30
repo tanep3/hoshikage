@@ -2,14 +2,15 @@ use crate::error::Result;
 use crate::i18n::Language;
 use crate::{
     commands::doctor::check_candidate_model,
+    config::Config,
     model::{
-        FallbackMode, ModelConfig, SpeculationConfig, SpeculationMode, ThinkingConfig,
-        ThinkingMode, ToolCallingConfig,
+        FallbackMode, ModelConfig, ModelRegistry, SpeculationConfig, SpeculationMode,
+        ThinkingConfig, ThinkingMode, ToolCallingConfig,
     },
 };
-use fs2::FileExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 #[derive(Debug, Serialize)]
@@ -48,8 +49,10 @@ pub struct AddModelOptions {
     pub label: String,
     pub stop_words: Vec<String>,
     pub mmproj: Option<String>,
+    pub mtp: bool,
     pub mtp_drafter: Option<String>,
     pub draft_model: Option<String>,
+    pub spec_draft_n_max: Option<NonZeroU32>,
     pub thinking_off: bool,
     pub n_ctx: Option<u32>,
     pub n_gpu_layers: Option<i32>,
@@ -130,38 +133,15 @@ async fn add_via_api(
     )))
 }
 
-fn add_directly(name: String, config: ModelConfig, language: Language) -> Result<()> {
-    let config_dir = dirs::config_dir().ok_or_else(|| {
-        crate::error::HoshikageError::ConfigError("Config directory not found".to_string())
-    })?;
-
-    let hoshikage_dir = config_dir.join("hoshikage");
-    std::fs::create_dir_all(&hoshikage_dir)?;
-
-    let model_map_path = hoshikage_dir.join("model_map.json");
-
-    let mut models: std::collections::HashMap<String, ModelConfig> = if model_map_path.exists() {
-        let content = std::fs::read_to_string(&model_map_path)?;
-        serde_json::from_str(&content)?
-    } else {
-        std::collections::HashMap::new()
-    };
-
-    use std::fs::OpenOptions;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&model_map_path)?;
-
-    file.try_lock_exclusive()
-        .map_err(|e| crate::error::HoshikageError::Other(format!("Failed to lock file: {}", e)))?;
-
-    models.insert(name.clone(), config);
-
-    let content = serde_json::to_string_pretty(&models)?;
-    std::fs::write(&model_map_path, &content)?;
+async fn add_directly_with_config(
+    name: String,
+    model_config: ModelConfig,
+    language: Language,
+    runtime_config: Config,
+) -> Result<()> {
+    let registry = ModelRegistry::new(runtime_config);
+    registry.load().await?;
+    registry.insert(name.clone(), model_config).await?;
 
     match language {
         Language::En => println!("Added model: {name}"),
@@ -170,14 +150,20 @@ fn add_directly(name: String, config: ModelConfig, language: Language) -> Result
     Ok(())
 }
 
+async fn add_directly(name: String, config: ModelConfig, language: Language) -> Result<()> {
+    add_directly_with_config(name, config, language, Config::load()?).await
+}
+
 pub async fn add_model(options: AddModelOptions) -> Result<()> {
     let AddModelOptions {
         path,
         label,
         stop_words,
         mmproj,
+        mtp,
         mtp_drafter,
         draft_model,
+        spec_draft_n_max,
         thinking_off,
         n_ctx,
         n_gpu_layers,
@@ -206,33 +192,13 @@ pub async fn add_model(options: AddModelOptions) -> Result<()> {
         .unwrap_or(".")
         .to_string();
 
-    let mut speculation_modes = Vec::new();
-    if mtp_drafter.is_some() {
-        speculation_modes.push(SpeculationMode::Mtp);
-    }
-    if draft_model.is_some() {
-        speculation_modes.push(SpeculationMode::DraftModel);
-    }
-
-    let drafter = match (mtp_drafter, draft_model) {
-        (Some(mtp), Some(draft)) if mtp == draft => Some(mtp),
-        (Some(_mtp), Some(_draft)) => {
-            return Err(crate::error::HoshikageError::ConfigError(
-                "current model bundle format supports one speculation auxiliary model path; use the same path for --mtp-drafter and --draft-model or register one mode at a time".to_string(),
-            ))
-        }
-        (Some(mtp), None) => Some(mtp),
-        (None, Some(draft)) => Some(draft),
-        (None, None) => None,
-    };
+    let (speculation, drafter) =
+        build_speculation_config(mtp, mtp_drafter, draft_model, spec_draft_n_max)?;
 
     let config = ModelConfig {
         mmproj,
         drafter,
-        speculation: SpeculationConfig {
-            modes: speculation_modes,
-            fallback: FallbackMode::Warn,
-        },
+        speculation,
         thinking: ThinkingConfig {
             mode: if thinking_off {
                 ThinkingMode::Off
@@ -254,13 +220,68 @@ pub async fn add_model(options: AddModelOptions) -> Result<()> {
     if check_server_running(port).await {
         add_via_api(port, label, config, language).await
     } else {
-        add_directly(label, config, language)
+        add_directly(label, config, language).await
     }
+}
+
+fn build_speculation_config(
+    mtp: bool,
+    mtp_drafter: Option<String>,
+    draft_model: Option<String>,
+    draft_n_max: Option<NonZeroU32>,
+) -> Result<(SpeculationConfig, Option<String>)> {
+    let mut modes = Vec::new();
+    if mtp || mtp_drafter.is_some() {
+        modes.push(SpeculationMode::Mtp);
+    }
+    if draft_model.is_some() {
+        modes.push(SpeculationMode::DraftModel);
+    }
+    if draft_n_max.is_some() && modes.is_empty() {
+        return Err(crate::error::HoshikageError::ConfigError(
+            "--spec-draft-n-max requires --mtp, --mtp-drafter, or --draft-model".to_string(),
+        ));
+    }
+
+    let drafter = match (mtp_drafter, draft_model) {
+        (Some(mtp), Some(draft)) if mtp == draft => Some(mtp),
+        (Some(_mtp), Some(_draft)) => {
+            return Err(crate::error::HoshikageError::ConfigError(
+                "current model bundle format supports one speculation auxiliary model path; use the same path for --mtp-drafter and --draft-model or register one mode at a time".to_string(),
+            ))
+        }
+        (Some(mtp), None) => Some(mtp),
+        (None, Some(draft)) => Some(draft),
+        (None, None) => None,
+    };
+    Ok((
+        SpeculationConfig {
+            modes,
+            draft_n_max,
+            fallback: FallbackMode::Warn,
+        },
+        drafter,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroU32;
+    use std::path::PathBuf;
+
+    fn test_model(name: &str) -> ModelConfig {
+        ModelConfig {
+            ..ModelConfig::new_legacy("/models".to_string(), format!("{name}.gguf"), Vec::new())
+        }
+    }
+
+    fn test_config(path: PathBuf) -> Config {
+        Config {
+            model_map_file: Some(path),
+            ..Config::default()
+        }
+    }
 
     #[test]
     fn test_config_serialization() {
@@ -275,5 +296,55 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("test.gguf"));
         assert!(json.contains("base_path"));
+    }
+
+    #[test]
+    fn built_in_mtp_does_not_require_a_drafter_file() {
+        let (speculation, drafter) =
+            build_speculation_config(true, None, None, NonZeroU32::new(6)).unwrap();
+
+        assert!(speculation.has_mode(SpeculationMode::Mtp));
+        assert_eq!(speculation.draft_n_max.map(|value| value.get()), Some(6));
+        assert_eq!(drafter, None);
+    }
+
+    #[test]
+    fn draft_n_max_requires_an_enabled_speculation_mode() {
+        let error = build_speculation_config(false, None, None, NonZeroU32::new(6)).unwrap_err();
+
+        assert!(error.to_string().contains("--spec-draft-n-max requires"));
+    }
+
+    #[tokio::test]
+    async fn direct_add_preserves_existing_models_and_valid_json() {
+        let directory =
+            std::env::temp_dir().join(format!("hoshikage-add-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("model_map.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&std::collections::HashMap::from([(
+                "existing".to_string(),
+                test_model("existing"),
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        add_directly_with_config(
+            "new".to_string(),
+            test_model("new"),
+            Language::En,
+            test_config(path.clone()),
+        )
+        .await
+        .unwrap();
+
+        let persisted: std::collections::HashMap<String, ModelConfig> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(persisted.contains_key("existing"));
+        assert!(persisted.contains_key("new"));
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

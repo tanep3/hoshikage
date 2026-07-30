@@ -119,7 +119,9 @@ mod auth_integration_tests {
         TokenStore,
     };
     use axum::body::{to_bytes, Body};
+    use axum::extract::ConnectInfo;
     use axum::http::{header, Request, StatusCode};
+    use std::net::SocketAddr;
     use tower::ServiceExt;
 
     fn store_path() -> std::path::PathBuf {
@@ -203,6 +205,41 @@ mod auth_integration_tests {
             .await
             .unwrap();
         assert_eq!(accepted.status(), StatusCode::OK);
+
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bearer_policy_allows_only_real_loopback_connections_without_a_token() {
+        let path = store_path();
+        let store = Arc::new(FileTokenStore::new(path.clone()));
+        let name = TokenName::new("codex-lan").unwrap();
+        let token = SecretToken::generate();
+        store
+            .create(StoredTokenRecord::new(&name, &token))
+            .await
+            .unwrap();
+        let router = create_router_with_auth(
+            manager(),
+            AuthState {
+                policy: AuthPolicy::BearerRequired,
+                store,
+            },
+        );
+
+        let mut loopback = Request::get("/v1/status").body(Body::empty()).unwrap();
+        loopback.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:41000".parse::<SocketAddr>().unwrap(),
+        ));
+        let accepted = router.clone().oneshot(loopback).await.unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+
+        let mut lan = Request::get("/v1/status").body(Body::empty()).unwrap();
+        lan.extensions_mut().insert(ConnectInfo(
+            "192.168.0.200:41000".parse::<SocketAddr>().unwrap(),
+        ));
+        let rejected = router.oneshot(lan).await.unwrap();
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
 
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }

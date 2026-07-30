@@ -351,6 +351,7 @@ mod tests {
             n_rs_seq: 16,
             speculation: SpeculationConfig {
                 modes: vec![SpeculationMode::Mtp],
+                draft_n_max: None,
                 fallback: FallbackMode::Warn,
             },
             thinking: ThinkingConfig {
@@ -375,6 +376,7 @@ mod tests {
         let result = LlamaFfiBackend::handle_speculation_unavailable(
             &SpeculationConfig {
                 modes: vec![SpeculationMode::Mtp],
+                draft_n_max: None,
                 fallback: FallbackMode::Strict,
             },
             SpeculationMode::Mtp,
@@ -389,6 +391,7 @@ mod tests {
         let result = LlamaFfiBackend::handle_speculation_unavailable(
             &SpeculationConfig {
                 modes: vec![SpeculationMode::Mtp],
+                draft_n_max: None,
                 fallback: FallbackMode::Warn,
             },
             SpeculationMode::Mtp,

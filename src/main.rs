@@ -11,6 +11,7 @@ use hoshikage::i18n::Language;
 use hoshikage::model::ModelManager;
 #[cfg(unix)]
 use std::fs::OpenOptions;
+use std::num::NonZeroU32;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
@@ -38,10 +39,14 @@ enum Commands {
         label: String,
         #[arg(long, value_name = "PATH")]
         mmproj: Option<String>,
+        #[arg(long)]
+        mtp: bool,
         #[arg(long, value_name = "PATH")]
         mtp_drafter: Option<String>,
         #[arg(long, value_name = "PATH")]
         draft_model: Option<String>,
+        #[arg(long, value_name = "N")]
+        spec_draft_n_max: Option<NonZeroU32>,
         #[arg(long)]
         thinking_off: bool,
         #[arg(long, value_name = "N")]
@@ -158,8 +163,10 @@ async fn main() -> hoshikage::Result<()> {
                 path,
                 label,
                 mmproj,
+                mtp,
                 mtp_drafter,
                 draft_model,
+                spec_draft_n_max,
                 thinking_off,
                 n_ctx,
                 n_gpu_layers,
@@ -170,8 +177,10 @@ async fn main() -> hoshikage::Result<()> {
                     path,
                     stop_words,
                     mmproj,
+                    mtp,
                     mtp_drafter,
                     draft_model,
+                    spec_draft_n_max,
                     thinking_off,
                     n_ctx,
                     n_gpu_layers,
@@ -269,7 +278,11 @@ async fn main() -> hoshikage::Result<()> {
 
     tracing::info!("Hoshikage server starting on {}:{}", config.host, port);
 
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

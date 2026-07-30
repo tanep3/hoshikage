@@ -135,6 +135,8 @@ Phase 0 実施結果:
 - モデルを切り替えるたびに `.env` を書き換える設計を避けられる。
 - bundle を読むだけで、そのモデルの実行条件を追跡できる。
 
+`model_map.json` の更新は、admin API と CLI direct fallback のどちらも `ModelRegistry` の原子的保存へ集約する。更新後の完全な JSON を一時ファイルへ書き込み、`fsync` 後に rename する。対象ファイルを先に `truncate` してからロック・再読込してはならない。追加・削除の失敗やプロセス中断が起きても、直前の有効な snapshot を維持する。
+
 ### 4.2 `llama-server-managed` を第一 runtime とする
 
 Hoshikage の最新モデル機能は、`llama-server` を Hoshikage が子プロセスとして管理する runtime backend で実行する。
@@ -207,6 +209,7 @@ Thinking mode は、モデルや runtime によって control token、chat templ
     "vision": true,
     "speculation": {
       "modes": ["mtp"],
+      "draft_n_max": 6,
       "fallback": "warn"
     },
     "thinking": {
@@ -899,7 +902,16 @@ pub struct RamdiskBundleState {
 | `warn` | 警告して通常推論 |
 | `off` | 最初から使わない |
 
-### 10.3 Fallback 判定
+### 10.3 Draft token上限
+
+`speculation.draft_n_max`は、1回のspeculative decodingで生成するdraft token数の上限を
+Bundleごとに指定する。型は0を表現できない`Option<NonZeroU32>`とし、指定時はmanaged
+llama-serverの`--spec-draft-n-max`へ変換する。未指定時は上流runtimeの既定値を使用する。
+
+`draft_n_max`はMTPまたはDraft model modeが有効な場合だけ意味を持つ。CLIと管理APIはmodeなしの
+指定を明示エラーにし、値を黙って無視しない。
+
+### 10.4 Fallback 判定
 
 ```text
 speculation.modes contains mtp
@@ -916,7 +928,7 @@ speculation.modes contains draft_model
 
 Vision 不整合は fallback しない。
 
-### 10.4 Fallback の通知
+### 10.5 Fallback の通知
 
 fallback が発生した場合、次の全てに記録する。
 
@@ -1024,6 +1036,7 @@ hoshikage list
 hoshikage add /models/main.gguf <LABEL> \
   --mmproj /models/mmproj.gguf \
   --draft /models/draft.gguf \
+  --spec-draft-n-max 6 \
   --n-ctx 8192 \
   --n-gpu-layers -1 \
   --vision \
@@ -1033,6 +1046,14 @@ hoshikage add /models/main.gguf <LABEL> \
 ```
 
 `--speculation` は複数回指定できる。例: `--speculation mtp --speculation draft_model`。併用可否は `llama-server` の対応に準拠し、Hoshikage 側で独自に禁止しない。
+
+内蔵MTPモデルはdrafter fileを指定せず、次のように登録する。
+
+```bash
+hoshikage add /models/qwen/main.gguf qwen-mtp \
+  --mtp \
+  --spec-draft-n-max 6
+```
 
 ```bash
 hoshikage doctor
@@ -1171,6 +1192,7 @@ hoshikage add --bundle-config /path/to/bundle.json
 
 - legacy `model_map.json` deserialize
 - bundle `model_map.json` deserialize
+- CLI direct add/remove 後も既存 Bundle と有効な JSON snapshot を維持
 - legacy -> bundle normalization
 - Chat content string / parts deserialize
 - data URL parse

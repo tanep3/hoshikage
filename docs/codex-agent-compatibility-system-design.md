@@ -1595,7 +1595,7 @@ pub enum AuthPolicy {
 - wildcard bind: non-loopback扱い
 - hostname: 解決結果にnon-loopbackが含まれ得る場合はBearer必須
 
-requestごとにbind addressを再解釈しない。
+`BearerRequired` policyでも、transportから取得した実接続元が`127.0.0.1`または`::1`であるrequestだけはローカル管理経路としてTokenなしで許可する。接続元情報がないrequestとnon-loopback requestはfail-closedとする。これによりwildcard bind時も、同一マシンの`hoshikage add/rm/list`はadmin APIを利用でき、LAN clientにはBearerを要求できる。requestごとにbind addressや転送headerを再解釈せず、Axum serverが提供するpeer socket addressだけを信頼する。
 
 ### 16.2 Token形式
 

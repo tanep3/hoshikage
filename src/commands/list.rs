@@ -157,6 +157,9 @@ fn print_model_details(name: &str, config: &crate::model::ModelConfig) {
         println!("    drafter: {}", drafter);
     }
     println!("    speculation: {:?}", config.speculation.modes);
+    if let Some(draft_n_max) = config.speculation.draft_n_max {
+        println!("    spec_draft_n_max: {}", draft_n_max);
+    }
     println!("    thinking: {:?}", config.thinking.mode);
     if let Some(n_ctx) = config.n_ctx {
         println!("    n_ctx: {}", n_ctx);

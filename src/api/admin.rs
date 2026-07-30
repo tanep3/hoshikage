@@ -59,13 +59,16 @@ pub async fn add_model(
         .unwrap_or(".")
         .to_string();
 
-    let mut speculation = req.speculation;
-    if speculation.is_off() && req.drafter.is_some() {
-        speculation.modes = vec![SpeculationMode::Mtp];
-    }
-    if req.drafter.is_none() {
-        speculation.modes.clear();
-    }
+    let speculation =
+        match normalize_speculation_registration(req.speculation, req.drafter.is_some()) {
+            Ok(speculation) => speculation,
+            Err(message) => {
+                return Json(AddModelResponse {
+                    success: false,
+                    message,
+                })
+            }
+        };
 
     let config = ModelConfig {
         mmproj: req.mmproj,
@@ -92,6 +95,22 @@ pub async fn add_model(
             })
         }
     }
+}
+
+fn normalize_speculation_registration(
+    mut speculation: SpeculationConfig,
+    has_drafter: bool,
+) -> Result<SpeculationConfig, String> {
+    if speculation.is_off() && has_drafter {
+        speculation.modes = vec![SpeculationMode::Mtp];
+    }
+    if speculation.draft_n_max.is_some() && speculation.is_off() {
+        return Err("speculation.draft_n_max requires an enabled speculation mode".to_string());
+    }
+    if speculation.has_mode(SpeculationMode::DraftModel) && !has_drafter {
+        return Err("draft_model speculation requires a drafter path".to_string());
+    }
+    Ok(speculation)
 }
 
 pub async fn remove_model(
@@ -147,6 +166,7 @@ mod tests {
             drafter: None,
             speculation: SpeculationConfig {
                 modes: Vec::new(),
+                draft_n_max: None,
                 fallback: FallbackMode::Warn,
             },
             thinking: ThinkingConfig {
@@ -186,5 +206,21 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("false"));
         assert!(json.contains("Test error"));
+    }
+
+    #[test]
+    fn built_in_mtp_registration_survives_without_a_drafter_path() {
+        let speculation = normalize_speculation_registration(
+            SpeculationConfig {
+                modes: vec![SpeculationMode::Mtp],
+                draft_n_max: std::num::NonZeroU32::new(6),
+                fallback: FallbackMode::Strict,
+            },
+            false,
+        )
+        .unwrap();
+
+        assert!(speculation.has_mode(SpeculationMode::Mtp));
+        assert_eq!(speculation.draft_n_max.map(|value| value.get()), Some(6));
     }
 }

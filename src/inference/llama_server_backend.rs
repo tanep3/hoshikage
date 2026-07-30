@@ -60,6 +60,10 @@ impl LlamaServerCommandSpec {
             args.push("on".to_string());
             args.push("--spec-draft-p-min".to_string());
             args.push("0.10".to_string());
+            if let Some(draft_n_max) = config.request.speculation.draft_n_max {
+                args.push("--spec-draft-n-max".to_string());
+                args.push(draft_n_max.get().to_string());
+            }
         }
 
         if let Some(draft_model) = config.request.draft_model.as_ref() {
@@ -283,6 +287,7 @@ mod tests {
         request.draft_model = Some(PathBuf::from("/models/draft.gguf"));
         request.speculation = SpeculationConfig {
             modes: vec![SpeculationMode::Mtp, SpeculationMode::DraftModel],
+            draft_n_max: std::num::NonZeroU32::new(6),
             fallback: FallbackMode::Warn,
         };
         request.thinking = ThinkingConfig {
@@ -304,6 +309,10 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair == ["--spec-draft-p-min", "0.10"]));
+        assert!(spec
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--spec-draft-n-max", "6"]));
         assert!(spec
             .args
             .windows(2)

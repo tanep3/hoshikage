@@ -178,14 +178,16 @@ Hoshikage は、単一 GGUF ファイルではなく、推論に必要なファ�
 - `n_ctx`: モデル別 context length
 - `n_gpu_layers`: モデル別 GPU offload 設定
 - `vision`: Vision 入力を許可するか
-- `speculation`: MTP / Draft model / fallback mode
+- `speculation`: MTP / Draft model / draft token上限 / fallback mode
 - `thinking`: Thinking mode 制御
 - `chat_template`: 必要に応じた chat template 指定
 
 **受け入れ条件:**
 - 既存の `hoshikage add <PATH> <LABEL> [STOP_WORDS]...` は従来通り動作する。
-- 新しい CLI または管理 API で、`mmproj`、`draft_model`、`speculation`、`thinking`、`n_ctx`、`n_gpu_layers` を登録できる。
-- `hoshikage add` は `--mmproj`, `--mtp-drafter`, `--draft-model`, `--thinking-off`, `--n-ctx`, `--n-gpu-layers` を受け付ける。
+- 新しい CLI または管理 API で、`mmproj`、`draft_model`、内蔵MTP、`spec_draft_n_max`、`speculation`、`thinking`、`n_ctx`、`n_gpu_layers` を登録できる。
+- `hoshikage add` は `--mmproj`, `--mtp`, `--mtp-drafter`, `--draft-model`, `--spec-draft-n-max`, `--thinking-off`, `--n-ctx`, `--n-gpu-layers` を受け付ける。
+- `speculation.draft_n_max`は0より大きい整数とし、speculation modeが有効なBundleにだけ指定できる。
+- `draft_n_max`未指定時は、利用するllama-server runtimeの既定値を変更しない。
 - MTP と Draft model の同時指定は llama.cpp runtime の対応に準拠する。Hoshikage は独自制限を設けず、`llama-server` が受け付けない組み合わせは `doctor` / 起動時診断で明示する。
 - モデルごとの設定が `.env` に散らばらない。
 - `model_map.json` を読めば、そのモデルをどう実行するかが追跡できる。

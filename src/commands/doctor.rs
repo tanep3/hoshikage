@@ -1106,6 +1106,7 @@ mod tests {
         let config = ModelConfig {
             speculation: SpeculationConfig {
                 modes: vec![SpeculationMode::Mtp],
+                draft_n_max: None,
                 fallback: FallbackMode::Strict,
             },
             ..ModelConfig::new_legacy("/models".to_string(), "main.gguf".to_string(), Vec::new())
@@ -1121,6 +1122,7 @@ mod tests {
         let config = ModelConfig {
             speculation: SpeculationConfig {
                 modes: vec![SpeculationMode::DraftModel],
+                draft_n_max: None,
                 fallback: FallbackMode::Warn,
             },
             ..ModelConfig::new_legacy("/models".to_string(), "main.gguf".to_string(), Vec::new())

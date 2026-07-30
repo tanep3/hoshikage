@@ -15,6 +15,7 @@ use crate::runtime::{RuntimeCoordinator, RuntimeEndpoint, RuntimeLease};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -55,6 +56,8 @@ pub struct SpeculationConfig {
         deserialize_with = "deserialize_speculation_modes"
     )]
     pub modes: Vec<SpeculationMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_n_max: Option<NonZeroU32>,
     #[serde(default)]
     pub fallback: FallbackMode,
 }
@@ -63,6 +66,7 @@ impl Default for SpeculationConfig {
     fn default() -> Self {
         Self {
             modes: Vec::new(),
+            draft_n_max: None,
             fallback: FallbackMode::Warn,
         }
     }
@@ -794,6 +798,7 @@ mod config_tests {
             "drafter": "mtp.gguf",
             "speculation": {
                 "mode": "mtp",
+                "draft_n_max": 6,
                 "fallback": "warn"
             },
             "thinking": {
@@ -813,9 +818,27 @@ mod config_tests {
         assert_eq!(config.mmproj.as_deref(), Some("mmproj.gguf"));
         assert_eq!(config.drafter.as_deref(), Some("mtp.gguf"));
         assert!(config.speculation.has_mode(SpeculationMode::Mtp));
+        assert_eq!(
+            config.speculation.draft_n_max.map(|value| value.get()),
+            Some(6)
+        );
         assert_eq!(config.thinking.mode, ThinkingMode::Off);
         assert_eq!(config.n_ctx, Some(8192));
         assert_eq!(config.n_gpu_layers, Some(-1));
+    }
+
+    #[test]
+    fn speculation_draft_n_max_rejects_zero() {
+        let json = r#"{
+            "base_path": "/models/qwen",
+            "model": "main.gguf",
+            "speculation": {
+                "modes": ["mtp"],
+                "draft_n_max": 0
+            }
+        }"#;
+
+        assert!(serde_json::from_str::<ModelConfig>(json).is_err());
     }
 
     #[test]
@@ -1079,6 +1102,8 @@ pub struct HoshikageModelInfo {
     pub mmproj_configured: bool,
     pub mtp_configured: bool,
     pub draft_model_configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_draft_n_max: Option<u32>,
     pub thinking: ThinkingMode,
     pub fallback: FallbackMode,
     pub reasoning: bool,
@@ -1125,6 +1150,7 @@ impl HoshikageModelInfo {
             mtp_configured: config.speculation.has_mode(SpeculationMode::Mtp),
             draft_model_configured: config.speculation.has_mode(SpeculationMode::DraftModel)
                 && config.drafter.is_some(),
+            spec_draft_n_max: config.speculation.draft_n_max.map(NonZeroU32::get),
             thinking: config.thinking.mode,
             fallback: config.speculation.fallback,
             reasoning: false,

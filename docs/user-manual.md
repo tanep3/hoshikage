@@ -41,7 +41,7 @@ HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_V=q8_0
 HOSHIKAGE_LANG=ja
 ```
 
-`HOST=127.0.0.1`または`localhost`は認証なしのloopback利用です。LANアドレスまたは`0.0.0.0`へbindするとBearer Token認証が必須になります。
+`HOST=127.0.0.1`または`localhost`は認証なしのloopback利用です。LANアドレスまたは`0.0.0.0`へbindした場合も、同一マシンから`127.0.0.1`または`::1`へ接続する管理CLIはTokenなしで利用できます。別端末からのLAN接続にはBearer Token認証が必須です。
 
 ## 2. モデル管理
 
@@ -55,6 +55,21 @@ hoshikage list --details
 Codex互換判定の下限は16Kですが、ToolやSkillを使う実用的なAgent用途では64Kを推奨します。モデルごとの`n_ctx`が未指定の場合は`.env`の`N_CTX`を使います。KVキャッシュはcontextに応じて増えるため、12GB級GPUでは`HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_K/V=q8_0`を開始点とし、`nvidia-smi`等で実機の余裕を確認してください。
 
 Tool CallingはBundleの`tool_calling`設定を正とします。未設定Bundleは安全側で`disabled`です。`doctor`は候補や矛盾を診断しますが、自動書換えしません。
+
+内蔵MTPを持つモデルは、drafter fileなしで登録できます。`--spec-draft-n-max`は1回に生成する
+draft token数の上限です。モデル配布元の推奨値がある場合だけ指定し、省略時はllama-serverの
+既定値を使います。
+
+```bash
+hoshikage add /models/qwen/Qwen3.5-9B.gguf qwen3.5-9b-mtp \
+  --mtp \
+  --spec-draft-n-max 6 \
+  --n-ctx 65536
+```
+
+外付けMTP drafterを使う既存モデルは、従来どおり`--mtp-drafter /models/mtp.gguf`を使います。
+`--spec-draft-n-max`だけを指定することはできません。`hoshikage list --details`と
+`GET /v1/hoshikage/models`でBundleごとの設定値を確認できます。
 
 ### 2.2 Bundle診断
 
