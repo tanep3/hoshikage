@@ -1138,6 +1138,7 @@ mod tests {
         let config = ModelConfig {
             thinking: ThinkingConfig {
                 mode: ThinkingMode::Auto,
+                ..ThinkingConfig::default()
             },
             ..ModelConfig::new_legacy("/models".to_string(), "main.gguf".to_string(), Vec::new())
         };

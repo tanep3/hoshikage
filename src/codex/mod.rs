@@ -207,6 +207,7 @@ mod tests {
             drafter: None,
             speculation: SpeculationConfig::default(),
             thinking: ThinkingConfig::default(),
+            llama_server: crate::model::LlamaServerModelConfig::default(),
             generation: crate::model::GenerationMode::Autoregressive,
             tool_calling: ToolCallingConfig {
                 mode: tools,

@@ -8,7 +8,7 @@ use hoshikage::commands::{
 use hoshikage::config::Config;
 use hoshikage::error::HoshikageError;
 use hoshikage::i18n::Language;
-use hoshikage::model::ModelManager;
+use hoshikage::model::{ModelManager, ThinkingMode};
 #[cfg(unix)]
 use std::fs::OpenOptions;
 use std::num::NonZeroU32;
@@ -49,8 +49,18 @@ enum Commands {
         spec_draft_n_max: Option<NonZeroU32>,
         #[arg(long)]
         thinking_off: bool,
+        #[arg(long, value_enum)]
+        thinking_mode: Option<ThinkingModeArg>,
+        #[arg(long, value_name = "N|unlimited")]
+        max_reasoning_tokens: Option<String>,
+        #[arg(long, value_name = "N")]
+        min_final_tokens: Option<u32>,
         #[arg(long)]
         diffusion: bool,
+        #[arg(long, value_name = "TYPE")]
+        cache_type_k: Option<String>,
+        #[arg(long, value_name = "TYPE")]
+        cache_type_v: Option<String>,
         #[arg(long, value_name = "N")]
         n_ctx: Option<u32>,
         #[arg(long, value_name = "N", allow_hyphen_values = true)]
@@ -107,6 +117,23 @@ enum ProfileModeArg {
 enum LanguageArg {
     En,
     Ja,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+enum ThinkingModeArg {
+    Auto,
+    On,
+    Off,
+}
+
+impl From<ThinkingModeArg> for ThinkingMode {
+    fn from(value: ThinkingModeArg) -> Self {
+        match value {
+            ThinkingModeArg::Auto => Self::Auto,
+            ThinkingModeArg::On => Self::On,
+            ThinkingModeArg::Off => Self::Off,
+        }
+    }
 }
 
 impl From<LanguageArg> for Language {
@@ -170,7 +197,12 @@ async fn main() -> hoshikage::Result<()> {
                 draft_model,
                 spec_draft_n_max,
                 thinking_off,
+                thinking_mode,
+                max_reasoning_tokens,
+                min_final_tokens,
                 diffusion,
+                cache_type_k,
+                cache_type_v,
                 n_ctx,
                 n_gpu_layers,
                 check,
@@ -185,7 +217,12 @@ async fn main() -> hoshikage::Result<()> {
                     draft_model,
                     spec_draft_n_max,
                     thinking_off,
+                    thinking_mode: thinking_mode.map(Into::into),
+                    max_reasoning_tokens,
+                    min_final_tokens,
                     diffusion,
+                    cache_type_k,
+                    cache_type_v,
                     n_ctx,
                     n_gpu_layers,
                     check,

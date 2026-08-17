@@ -4,8 +4,8 @@ use crate::{
     commands::doctor::check_candidate_model,
     config::Config,
     model::{
-        FallbackMode, GenerationMode, ModelConfig, ModelRegistry, SpeculationConfig,
-        SpeculationMode, ThinkingConfig, ThinkingMode, ToolCallingConfig,
+        FallbackMode, GenerationMode, LlamaServerModelConfig, ModelConfig, ModelRegistry,
+        SpeculationConfig, SpeculationMode, ThinkingConfig, ThinkingMode, ToolCallingConfig,
     },
 };
 use reqwest::Client;
@@ -38,6 +38,8 @@ struct AddModelRequest {
     pub n_ctx: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n_gpu_layers: Option<i32>,
+    #[serde(default)]
+    pub llama_server: LlamaServerModelConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,7 +58,12 @@ pub struct AddModelOptions {
     pub draft_model: Option<String>,
     pub spec_draft_n_max: Option<NonZeroU32>,
     pub thinking_off: bool,
+    pub thinking_mode: Option<ThinkingMode>,
+    pub max_reasoning_tokens: Option<String>,
+    pub min_final_tokens: Option<u32>,
     pub diffusion: bool,
+    pub cache_type_k: Option<String>,
+    pub cache_type_v: Option<String>,
     pub n_ctx: Option<u32>,
     pub n_gpu_layers: Option<i32>,
     pub check: bool,
@@ -98,6 +105,7 @@ async fn add_via_api(
         tool_calling: config.tool_calling,
         n_ctx: config.n_ctx,
         n_gpu_layers: config.n_gpu_layers,
+        llama_server: config.llama_server,
     };
 
     let mut last_error = None;
@@ -169,7 +177,12 @@ pub async fn add_model(options: AddModelOptions) -> Result<()> {
         draft_model,
         spec_draft_n_max,
         thinking_off,
+        thinking_mode,
+        max_reasoning_tokens,
+        min_final_tokens,
         diffusion,
+        cache_type_k,
+        cache_type_v,
         n_ctx,
         n_gpu_layers,
         check,
@@ -200,17 +213,44 @@ pub async fn add_model(options: AddModelOptions) -> Result<()> {
     let (speculation, drafter) =
         build_speculation_config(mtp, mtp_drafter, draft_model, spec_draft_n_max)?;
 
+    if thinking_off
+        && thinking_mode
+            .as_ref()
+            .is_some_and(|mode| *mode != ThinkingMode::Off)
+    {
+        return Err(crate::error::HoshikageError::ConfigError(
+            "--thinking-off cannot be combined with --thinking-mode auto or on".to_string(),
+        ));
+    }
+    let mode = if thinking_off {
+        ThinkingMode::Off
+    } else {
+        thinking_mode.unwrap_or(ThinkingMode::Auto)
+    };
+    let max_reasoning_tokens = parse_reasoning_tokens(max_reasoning_tokens)?;
+    let thinking = ThinkingConfig {
+        mode: mode.clone(),
+        max_reasoning_tokens: max_reasoning_tokens
+            .or_else(|| (mode == ThinkingMode::On).then_some(32_768)),
+        min_final_tokens: min_final_tokens.unwrap_or_else(|| {
+            if mode == ThinkingMode::On {
+                8_192
+            } else {
+                0
+            }
+        }),
+    };
+    let llama_server = LlamaServerModelConfig {
+        cache_type_k: parse_cache_type("--cache-type-k", cache_type_k.as_deref())?,
+        cache_type_v: parse_cache_type("--cache-type-v", cache_type_v.as_deref())?,
+    };
+
     let config = ModelConfig {
         mmproj,
         drafter,
         speculation,
-        thinking: ThinkingConfig {
-            mode: if thinking_off {
-                ThinkingMode::Off
-            } else {
-                ThinkingMode::Auto
-            },
-        },
+        thinking,
+        llama_server,
         generation: if diffusion {
             GenerationMode::Diffusion
         } else {
@@ -232,6 +272,30 @@ pub async fn add_model(options: AddModelOptions) -> Result<()> {
     } else {
         add_directly(label, config, language).await
     }
+}
+
+fn parse_reasoning_tokens(value: Option<String>) -> Result<Option<u32>> {
+    let Some(value) = value else { return Ok(None) };
+    if value.eq_ignore_ascii_case("unlimited") {
+        return Ok(None);
+    }
+    let parsed = value.parse::<u32>().map_err(|_| {
+        crate::error::HoshikageError::ConfigError(
+            "--max-reasoning-tokens must be a positive integer or unlimited".to_string(),
+        )
+    })?;
+    if parsed == 0 {
+        return Err(crate::error::HoshikageError::ConfigError(
+            "--max-reasoning-tokens must be a positive integer or unlimited".to_string(),
+        ));
+    }
+    Ok(Some(parsed))
+}
+
+fn parse_cache_type(key: &str, value: Option<&str>) -> Result<Option<crate::config::KvCacheType>> {
+    value.map_or(Ok(None), |value| {
+        crate::config::KvCacheType::parse_optional(key, value)
+    })
 }
 
 fn build_speculation_config(

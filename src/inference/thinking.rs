@@ -19,6 +19,14 @@ impl ThinkingController {
                 runtime_budget_tokens: None,
                 diagnostic: None,
             },
+            ThinkingMode::On => ThinkingDecision {
+                effective_mode: ThinkingMode::On,
+                strip_thinking: false,
+                runtime_budget_tokens: config
+                    .max_reasoning_tokens
+                    .and_then(|value| i32::try_from(value).ok()),
+                diagnostic: None,
+            },
             ThinkingMode::Off => ThinkingDecision {
                 effective_mode: ThinkingMode::Off,
                 strip_thinking: true,
@@ -237,6 +245,7 @@ mod tests {
     fn off_decision() -> ThinkingDecision {
         ThinkingController::decide(&ThinkingConfig {
             mode: ThinkingMode::Off,
+            ..ThinkingConfig::default()
         })
     }
 
@@ -244,6 +253,7 @@ mod tests {
     fn auto_keeps_output_unchanged() {
         let decision = ThinkingController::decide(&ThinkingConfig {
             mode: ThinkingMode::Auto,
+            ..ThinkingConfig::default()
         });
 
         assert_eq!(

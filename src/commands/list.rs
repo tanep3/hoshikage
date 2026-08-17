@@ -161,7 +161,19 @@ fn print_model_details(name: &str, config: &crate::model::ModelConfig) {
         println!("    spec_draft_n_max: {}", draft_n_max);
     }
     println!("    thinking: {:?}", config.thinking.mode);
+    if let Some(max_reasoning_tokens) = config.thinking.max_reasoning_tokens {
+        println!("    max_reasoning_tokens: {}", max_reasoning_tokens);
+    } else {
+        println!("    max_reasoning_tokens: unlimited");
+    }
+    println!("    min_final_tokens: {}", config.thinking.min_final_tokens);
     println!("    generation: {:?}", config.generation);
+    if let Some(cache_type_k) = config.llama_server.cache_type_k {
+        println!("    cache_type_k: {}", cache_type_k.as_str());
+    }
+    if let Some(cache_type_v) = config.llama_server.cache_type_v {
+        println!("    cache_type_v: {}", cache_type_v.as_str());
+    }
     if let Some(n_ctx) = config.n_ctx {
         println!("    n_ctx: {}", n_ctx);
     }

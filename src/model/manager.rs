@@ -48,6 +48,22 @@ pub struct ModelConfig {
     pub n_ctx: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n_gpu_layers: Option<i32>,
+    #[serde(default, skip_serializing_if = "LlamaServerModelConfig::is_default")]
+    pub llama_server: LlamaServerModelConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LlamaServerModelConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_type_k: Option<crate::config::KvCacheType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_type_v: Option<crate::config::KvCacheType>,
+}
+
+impl LlamaServerModelConfig {
+    fn is_default(value: &Self) -> bool {
+        value == &Self::default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -374,6 +390,7 @@ mod stream_retry_tests {
             drafter: None,
             speculation: SpeculationConfig::default(),
             thinking: ThinkingConfig::default(),
+            llama_server: LlamaServerModelConfig::default(),
             generation: GenerationMode::Autoregressive,
             tool_calling: ToolCallingConfig {
                 mode: crate::model::ToolCallingMode::Native,
@@ -715,12 +732,22 @@ pub enum FallbackMode {
 pub struct ThinkingConfig {
     #[serde(default)]
     pub mode: ThinkingMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_reasoning_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub min_final_tokens: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl Default for ThinkingConfig {
     fn default() -> Self {
         Self {
             mode: ThinkingMode::Auto,
+            max_reasoning_tokens: None,
+            min_final_tokens: 0,
         }
     }
 }
@@ -730,6 +757,7 @@ impl Default for ThinkingConfig {
 pub enum ThinkingMode {
     #[default]
     Auto,
+    On,
     Off,
 }
 
@@ -747,6 +775,7 @@ impl ModelConfig {
             tool_calling: ToolCallingConfig::default(),
             n_ctx: None,
             n_gpu_layers: None,
+            llama_server: LlamaServerModelConfig::default(),
         }
     }
 
@@ -1183,6 +1212,7 @@ impl HoshikageModelInfo {
         default_context_window: u32,
         responses_vision_enabled: bool,
     ) -> Self {
+        let reasoning = config.thinking.mode != ThinkingMode::Off;
         Self {
             id,
             generation: config.generation,
@@ -1202,7 +1232,7 @@ impl HoshikageModelInfo {
             spec_draft_n_max: config.speculation.draft_n_max.map(NonZeroU32::get),
             thinking: config.thinking.mode,
             fallback: config.speculation.fallback,
-            reasoning: false,
+            reasoning,
             tool_calling_mode: config.tool_calling.mode,
             tool_parser: config.tool_calling.effective_parser(),
         }
@@ -1264,6 +1294,37 @@ pub struct ModelManager {
     semaphore: Arc<Semaphore>,
     managed_runtime: RuntimeCoordinator,
     llama_server_client: LlamaServerClient,
+}
+
+fn apply_reasoning_budget(
+    body: &mut serde_json::Value,
+    config: &ModelConfig,
+    request: &ModelRequest,
+    plan: ContextPlan,
+) {
+    if config.thinking.mode == ThinkingMode::Off {
+        return;
+    }
+
+    let remaining = plan.context_window.saturating_sub(plan.input_tokens);
+    let generation_capacity = request
+        .max_output_tokens
+        .map_or(remaining, |limit| limit.min(remaining));
+    let reserved_final = config.thinking.min_final_tokens.min(generation_capacity);
+    let available_for_reasoning = generation_capacity.saturating_sub(reserved_final);
+    let effective_budget = config
+        .thinking
+        .max_reasoning_tokens
+        .map_or(available_for_reasoning, |limit| {
+            limit.min(available_for_reasoning)
+        });
+
+    if config.thinking.max_reasoning_tokens.is_some()
+        || config.thinking.min_final_tokens > 0
+        || config.thinking.mode == ThinkingMode::On
+    {
+        body["thinking_budget_tokens"] = serde_json::json!(effective_budget);
+    }
 }
 
 impl ModelManager {
@@ -1993,7 +2054,7 @@ impl ModelManager {
                 "Prepared Tool Calling request"
             );
         }
-        let body = match mode {
+        let mut body = match mode {
             crate::model::ToolCallingMode::Json => {
                 build_generic_json_request(model, &request, &model_config, &defaults)?
             }
@@ -2017,13 +2078,15 @@ impl ModelManager {
             None
         };
         let lease = self.acquire_managed_llama_server(model.as_str()).await?;
-        self.managed_context_plan(
-            &lease,
-            &body,
-            request.max_output_tokens.unwrap_or(0),
-            model_config.n_ctx.unwrap_or(self.config.n_ctx),
-        )
-        .await?;
+        let plan = self
+            .managed_context_plan(
+                &lease,
+                &body,
+                request.max_output_tokens.unwrap_or(0),
+                model_config.n_ctx.unwrap_or(self.config.n_ctx),
+            )
+            .await?;
+        apply_reasoning_budget(&mut body, &model_config, &request, plan);
         let first_timeout = std::time::Duration::from_secs(self.config.first_token_timeout_secs);
         let idle_timeout = std::time::Duration::from_secs(self.config.stream_idle_timeout_secs);
         let generation_timeout =
@@ -2221,6 +2284,8 @@ impl ModelManager {
                 model_config.n_ctx.unwrap_or(self.config.n_ctx),
             )
             .await?;
+        let mut body = body.clone();
+        apply_reasoning_budget(&mut body, model_config, request, plan);
         tracing::debug!(
             model = model.as_str(),
             input_tokens = plan.input_tokens,
@@ -2229,7 +2294,7 @@ impl ModelManager {
             accuracy = ?plan.accuracy,
             "Validated Responses context plan"
         );
-        let upstream = match self.send_managed_chat(lease, body).await {
+        let upstream = match self.send_managed_chat(lease, &body).await {
             Ok(response) => response,
             Err(error) => {
                 self.mark_managed_lease_unhealthy(
@@ -2730,6 +2795,7 @@ impl ModelManager {
             },
             speculation: config.speculation.clone(),
             thinking: config.thinking.clone(),
+            llama_server: config.llama_server.clone(),
         }
     }
 

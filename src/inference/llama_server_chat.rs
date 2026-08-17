@@ -73,6 +73,11 @@ pub fn build_chat_request(
     }
     if model_config.thinking.mode == ThinkingMode::Off {
         body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
+    } else if model_config.thinking.mode == ThinkingMode::On {
+        body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": true });
+        if let Some(budget) = model_config.thinking.max_reasoning_tokens {
+            body["thinking_budget_tokens"] = serde_json::json!(budget);
+        }
     }
     if request.stream {
         body["stream_options"] = serde_json::json!({ "include_usage": true });
@@ -385,6 +390,29 @@ mod tests {
         .unwrap();
 
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn adapter_applies_thinking_on_and_bundle_reasoning_budget() {
+        let mut config =
+            ModelConfig::new_legacy("/models".to_string(), "model.gguf".to_string(), Vec::new());
+        config.thinking.mode = ThinkingMode::On;
+        config.thinking.max_reasoning_tokens = Some(32_768);
+
+        let body = build_chat_request(
+            &ModelId::new("gemma4").unwrap(),
+            &request(),
+            &config,
+            &LlamaServerChatDefaults {
+                temperature: 0.2,
+                top_p: 0.8,
+                repeat_penalty: 1.1,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(body["thinking_budget_tokens"], 32_768);
     }
 
     #[test]

@@ -17,6 +17,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StreamOptions {
+    #[serde(default)]
+    pub include_usage: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
@@ -28,6 +34,8 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub stream: Option<bool>,
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
     #[serde(default)]
     pub stop: Option<Vec<String>>,
     #[serde(default)]
@@ -995,6 +1003,7 @@ mod tests {
             top_p: None,
             max_tokens: Some(100),
             stream: None,
+            stream_options: None,
             stop: None,
             presence_penalty: None,
             frequency_penalty: None,
@@ -1096,6 +1105,7 @@ mod tests {
             top_p: None,
             max_tokens: None,
             stream: None,
+            stream_options: None,
             stop: Some(vec!["<request-stop>".to_string()]),
             presence_penalty: None,
             frequency_penalty: None,
@@ -1138,6 +1148,7 @@ mod tests {
             top_p: None,
             max_tokens: None,
             stream: None,
+            stream_options: None,
             stop: None,
             presence_penalty: None,
             frequency_penalty: None,
@@ -1178,6 +1189,7 @@ mod tests {
             top_p: None,
             max_tokens: None,
             stream: None,
+            stream_options: None,
             stop: None,
             presence_penalty: None,
             frequency_penalty: None,

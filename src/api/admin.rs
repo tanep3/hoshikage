@@ -1,6 +1,6 @@
 use crate::model::{
-    GenerationMode, ModelConfig, SpeculationConfig, SpeculationMode, ThinkingConfig,
-    ToolCallingConfig,
+    GenerationMode, LlamaServerModelConfig, ModelConfig, SpeculationConfig, SpeculationMode,
+    ThinkingConfig, ToolCallingConfig,
 };
 use axum::{
     extract::{Path, State},
@@ -34,6 +34,8 @@ pub struct AddModelRequest {
     pub n_ctx: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n_gpu_layers: Option<i32>,
+    #[serde(default)]
+    pub llama_server: LlamaServerModelConfig,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +84,7 @@ pub async fn add_model(
         tool_calling: req.tool_calling,
         n_ctx: req.n_ctx,
         n_gpu_layers: req.n_gpu_layers,
+        llama_server: req.llama_server,
         ..ModelConfig::new_legacy(model_dir, model_file, req.stop)
     };
 
@@ -175,11 +178,13 @@ mod tests {
             },
             thinking: ThinkingConfig {
                 mode: ThinkingMode::Off,
+                ..ThinkingConfig::default()
             },
             generation: GenerationMode::Autoregressive,
             tool_calling: ToolCallingConfig::default(),
             n_ctx: Some(8192),
             n_gpu_layers: Some(-1),
+            llama_server: LlamaServerModelConfig::default(),
         };
 
         let json = serde_json::to_string(&req).unwrap();

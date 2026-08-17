@@ -5,7 +5,9 @@ use crate::inference::{
     LlamaWrapper, SpeculationAdapter, SpeculationAdapterMode, SpeculationSession,
     SpeculationSessionConfig, VisionRuntime,
 };
-use crate::model::{FallbackMode, SpeculationConfig, SpeculationMode, ThinkingConfig};
+use crate::model::{
+    FallbackMode, LlamaServerModelConfig, SpeculationConfig, SpeculationMode, ThinkingConfig,
+};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -18,6 +20,7 @@ pub struct LlamaLoadRequest {
     pub n_rs_seq: u32,
     pub speculation: SpeculationConfig,
     pub thinking: ThinkingConfig,
+    pub llama_server: LlamaServerModelConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,7 +359,9 @@ mod tests {
             },
             thinking: ThinkingConfig {
                 mode: ThinkingMode::Off,
+                ..ThinkingConfig::default()
             },
+            llama_server: crate::model::LlamaServerModelConfig::default(),
         };
 
         assert_eq!(request.main_model, PathBuf::from("/models/main.gguf"));
