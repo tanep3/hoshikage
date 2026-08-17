@@ -405,6 +405,19 @@ When Tool Calling is `disabled`, Codex can use text responses only. To use file 
 - `POST /v1/chat/completions`: existing Chat Completions API
 - `POST /v1/responses`: Responses API for Codex
 
+`GET /v1/status` reports the runtime state and, when an inference has completed, the latest inference metrics.
+The metrics may include the model, Tool Calling mode, input and output token counts, total elapsed time,
+time to first token, and generated tokens per second. Metrics may be absent immediately after startup.
+
+```bash
+curl -sS http://127.0.0.1:3030/v1/status | python3 -m json.tool
+```
+
+Upper-layer applications can poll `GET /v1/models` to reflect added or removed Bundles without restarting.
+Use `GET /v1/hoshikage/models` when detailed capabilities such as Vision, Thinking, and Tool Calling are needed.
+
+For LAN connections, send `Authorization: Bearer <Token>` with the `/v1` endpoints above.
+
 ### 6.2 Sending an image to the Responses API
 
 The Responses API accepts JPEG and PNG Data URIs when the Bundle configures `mmproj` and uses the managed llama-server runtime. Codex CLI users do not need to convert the image file to Base64 manually.

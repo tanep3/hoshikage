@@ -405,6 +405,19 @@ Tool Callingが`disabled`ならCodexはテキスト応答だけ利用できま�
 - `POST /v1/chat/completions`: 既存Chat Completions
 - `POST /v1/responses`: Codex向けResponses API
 
+`GET /v1/status`は、現在のruntime状態に加えて、直近の推論メトリクスを返します。実装済みの場合は
+モデル名、Tool Calling mode、入力・出力token数、総時間、first token latency、生成token/secを確認できます。
+初回起動直後など、まだ推論がない場合はメトリクスが存在しないことがあります。
+
+```bash
+curl -sS http://127.0.0.1:3030/v1/status | python3 -m json.tool
+```
+
+上位アプリケーションは`GET /v1/models`を定期取得して、登録済みBundleの追加・削除を再起動なしに反映できます。
+詳細能力、Vision、Thinking、Tool Callingの情報が必要な場合は`GET /v1/hoshikage/models`を使います。
+
+LAN接続では、上記の`/v1`系エンドポイントに`Authorization: Bearer <Token>`を付けてください。
+
 ### 6.2 Responses APIへ画像を渡す
 
 Bundleに`mmproj`が設定され、managed llama-serverを使用している場合、Responses APIはJPEGとPNGのData URIを受理します。Codex CLIでは画像fileをBase64へ手動変換する必要はありません。

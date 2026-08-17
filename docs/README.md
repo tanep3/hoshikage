@@ -24,6 +24,7 @@ Hoshikageの正規ドキュメントと作業記録への入口です。
 
 ## Existing Hoshikage
 
+- [プロジェクト概要](../README.md)
 - [API仕様](api-spec.md)
 - [ユーザーマニュアル（日本語）](user-manual.md)
 - [User Manual (English)](user-manual.en.md)
@@ -31,3 +32,7 @@ Hoshikageの正規ドキュメントと作業記録への入口です。
 - [Model Runtime Revision 要件](model-runtime-revision-requirements.md)
 - [Model Runtime Revision 設計](model-runtime-revision-system-design.md)
 - [Model Runtime Regression調査 (2026-07-30)](research/model-runtime-regression-2026-07-30.md)
+
+実装済みの主要な接続確認は、Hoshikageの`/health`、`/v1/models`、`/v1/responses`、
+およびCodex Hoshikage Proxy経由のモデル一覧・Responses疎通で行う。作業ログと受け入れ条件は、
+各要件書・設計書・Phaseログを正とする。

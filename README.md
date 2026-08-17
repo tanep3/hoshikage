@@ -25,6 +25,8 @@
 - **Model Bundle 管理**: メインモデル、Vision projector、MTP / Draft model、推論設定をモデル単位で管理
 - **Vision / MTP / Draft model 対応**: 最新の GGUF モデル機能に追従する managed `llama-server` runtime
 - **Thinking mode 制御**: 低レイテンシ用途向けにモデル単位で Thinking off を指定可能
+- **動的モデルカタログ**: `/v1/models` と独自カタログで Bundle の能力を上位アプリケーションへ公開
+- **診断と推論メトリクス**: `doctor`、`/v1/status`、ログで runtime 状態と直近推論を確認可能
 - **CUDA 版 llama.cpp 導入**: Linux CUDA では source build、macOS / Windows / Linux CPU 系では prebuilt archive を使う導入手順を整備
 
 ### 🔌 OpenAI互換API
@@ -51,7 +53,7 @@
 
 ### ソフトウェア
 
-- **OS**: Linux（Ubuntu 20.04以降推奨）
+- **OS**: Linux、macOS、Windows（Linux Ubuntu 20.04以降を推奨）
 - **CUDAドライバ**: 470+ (GTX 1650以降)
 - **Rust**: 1.70以上
 
@@ -88,6 +90,19 @@ hoshikage --port 8080
 
 モデルのダウンロード配置、APIの呼び出し方、Systemdによるデーモン化などの詳細は、
 **[ユーザーマニュアル](docs/user-manual.md)** をご覧ください。
+
+### Codex / 上位アプリケーションとの接続
+
+HoshikageはAgent LoopやTool実行を担当せず、Responses APIを提供するローカル推論Providerです。
+CodexやYatagarasuなどの上位アプリケーションは、`GET /v1/models`から利用可能なBundleを取得し、
+選択したモデルを`POST /v1/responses`へ送ります。接続設定、LAN Token、Vision、Tool Calling、
+本番確認手順は[ユーザーマニュアル](docs/user-manual.md)を参照してください。
+
+推論状態と直近メトリクスは次で確認できます。
+
+```bash
+curl http://127.0.0.1:3030/v1/status
+```
 
 ---
 
