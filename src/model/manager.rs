@@ -1365,6 +1365,7 @@ fn log_generation_metrics(
     model: &crate::conversation::ModelId,
     mode: crate::model::ToolCallingMode,
     elapsed: Duration,
+    first_token_elapsed: Option<Duration>,
     usage: TokenUsage,
 ) {
     let (input_tokens, output_tokens) = match usage {
@@ -1390,6 +1391,7 @@ fn log_generation_metrics(
         input_tokens,
         output_tokens,
         total_elapsed_ms = elapsed.as_millis() as u64,
+        ttft_ms = first_token_elapsed.map(|value| value.as_millis() as u64),
         generation_tokens_per_second,
         "inference metrics"
     );
@@ -2159,6 +2161,7 @@ impl ModelManager {
         let idle_timeout = std::time::Duration::from_secs(self.config.stream_idle_timeout_secs);
         let generation_timeout =
             std::time::Duration::from_secs(self.config.generation_timeout_secs);
+        let generation_started_at = Instant::now();
         let upstream = tokio::time::timeout(first_timeout, self.send_managed_chat(&lease, &body))
             .await
             .map_err(|_| crate::error::HoshikageError::UpstreamTimeout)??;
@@ -2178,12 +2181,14 @@ impl ModelManager {
             first_timeout,
             generation_timeout,
         };
+        let metric_model = model.clone();
         let stream = async_stream::try_stream! {
             let mut lease = Some(lease);
             let mut upstream = upstream.bytes_stream();
             let mut sse = LlamaServerSseDecoder::default();
-            let started_at = tokio::time::Instant::now();
+            let started_at = generation_started_at;
             let mut first_chunk = true;
+            let mut first_token_elapsed = None;
 
             match mode {
                 crate::model::ToolCallingMode::Native
@@ -2226,6 +2231,13 @@ impl ModelManager {
                             }
                             Err(error) => Err(error)?,
                         };
+                        if first_token_elapsed.is_none()
+                            && deltas.iter().any(|delta| {
+                                !matches!(delta, ModelDelta::Usage(_) | ModelDelta::Finished(_))
+                            })
+                        {
+                            first_token_elapsed = Some(started_at.elapsed());
+                        }
                         for delta in deltas {
                             let actions = match strategy.push(delta) {
                                 Ok(actions) => actions,
@@ -2269,6 +2281,17 @@ impl ModelManager {
                     } else {
                         sse.finish()?;
                         let completion = strategy.finish()?;
+                        let usage = match &completion {
+                            ModelStreamAction::Complete { usage } => usage.clone(),
+                            _ => Err(crate::error::HoshikageError::ResponseTranslationFailed)?,
+                        };
+                        log_generation_metrics(
+                            &metric_model,
+                            mode,
+                            started_at.elapsed(),
+                            first_token_elapsed,
+                            usage,
+                        );
                         for action in attempt_buffer.commit(completion) {
                             yield action;
                         }
@@ -2293,7 +2316,15 @@ impl ModelManager {
                         let chunk = chunk
                             .map_err(|_| crate::error::HoshikageError::UpstreamDisconnected)?;
                         first_chunk = false;
-                        for delta in sse.push(&chunk)? {
+                        let deltas = sse.push(&chunk)?;
+                        if first_token_elapsed.is_none()
+                            && deltas.iter().any(|delta| {
+                                !matches!(delta, ModelDelta::Usage(_) | ModelDelta::Finished(_))
+                            })
+                        {
+                            first_token_elapsed = Some(started_at.elapsed());
+                        }
+                        for delta in deltas {
                             match delta {
                                 ModelDelta::Text(fragment) => content.push_str(&fragment),
                                 ModelDelta::Usage(measured) => usage = Some(measured),
@@ -2321,6 +2352,13 @@ impl ModelManager {
                         &validation_request,
                         &model_config,
                     )?;
+                    log_generation_metrics(
+                        &metric_model,
+                        mode,
+                        started_at.elapsed(),
+                        first_token_elapsed,
+                        completion_usage(&completion),
+                    );
                     for action in buffered_completion_actions(completion) {
                         yield action;
                     }
@@ -2406,6 +2444,7 @@ impl ModelManager {
             model,
             mode,
             generation_started_at.elapsed(),
+            None,
             completion_usage(&completion),
         );
         Ok(completion)
