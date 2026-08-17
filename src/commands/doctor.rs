@@ -947,7 +947,10 @@ fn thinking_compat_check(
         return DiagnosticCheck {
             id: "model.thinking.compat".to_string(),
             status: DiagnosticStatus::Ok,
-            message: text("Thinking mode is automatic", "Thinking mode は auto です"),
+            message: text(
+                format!("Thinking mode is {:?}", model_config.thinking.mode),
+                format!("Thinking mode は {:?} です", model_config.thinking.mode),
+            ),
             remediation: None,
         };
     }
@@ -958,15 +961,12 @@ fn thinking_compat_check(
     if has_prompt_policy {
         DiagnosticCheck {
             id: "model.thinking.compat".to_string(),
-            status: DiagnosticStatus::Warn,
+            status: DiagnosticStatus::Ok,
             message: text(
-                "Thinking off is enforced by the prompt policy and safety filter; the runtime budget adapter is not connected",
-                "Thinking off は prompt policy と safety filter で適用されます。runtime budget adapter は未接続です",
+                "Thinking off is enforced by the runtime policy and safety filter",
+                "Thinking off は runtime policy と safety filter で適用されます",
             ),
-            remediation: Some(text(
-                "Connect runtime budget control when the adapter is available",
-                "adapter 実装フェーズで runtime budget 制御を接続します",
-            )),
+            remediation: None,
         }
     } else {
         DiagnosticCheck {

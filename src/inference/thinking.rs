@@ -31,10 +31,7 @@ impl ThinkingController {
                 effective_mode: ThinkingMode::Off,
                 strip_thinking: true,
                 runtime_budget_tokens: Some(0),
-                diagnostic: Some(
-                    "Thinking off is applied by prompt policy and response safety filtering; runtime budget adapter is not connected yet"
-                        .to_string(),
-                ),
+                diagnostic: None,
             },
         }
     }
