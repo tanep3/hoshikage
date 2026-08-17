@@ -1,4 +1,5 @@
 use crate::error::Result;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -8,13 +9,14 @@ pub enum UnknownFieldPolicy {
     Strict,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeBackendKind {
     LlamaServerManaged,
     LlamaFfi,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum KvCacheType {
     F32,
     F16,
@@ -445,7 +447,7 @@ impl KvCacheType {
         }
     }
 
-    fn parse_optional(key: &str, value: &str) -> Result<Option<Self>> {
+    pub fn parse_optional(key: &str, value: &str) -> Result<Option<Self>> {
         match value {
             "" | "default" | "off" => Ok(None),
             "f32" => Ok(Some(Self::F32)),

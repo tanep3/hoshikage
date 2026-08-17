@@ -241,7 +241,7 @@ mod tests {
             }]),
             tool_choice: choice,
             sampling: SamplingOptions::default(),
-            max_output_tokens: 256,
+            max_output_tokens: Some(256),
             stream: false,
         }
     }

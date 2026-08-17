@@ -41,7 +41,7 @@ HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_V=q8_0
 HOSHIKAGE_LANG=ja
 ```
 
-Binding to `HOST=127.0.0.1` or `localhost` allows unauthenticated loopback access. Binding to a LAN address or `0.0.0.0` requires Bearer Token authentication.
+Binding to `HOST=127.0.0.1` or `localhost` allows unauthenticated loopback access. When binding to a LAN address or `0.0.0.0`, an administrator CLI connecting from the same machine through `127.0.0.1` or `::1` also remains Token-free. Connections from another device over the LAN require Bearer Token authentication.
 
 ## 2. Model Management
 
@@ -55,6 +55,37 @@ hoshikage list --details
 The Codex compatibility floor is 16K, but 64K is recommended for practical agent workloads that use tools and skills. When a model has no explicit `n_ctx`, Hoshikage uses `N_CTX` from `.env`. Because KV cache usage grows with context, start with `HOSHIKAGE_LLAMA_SERVER_CACHE_TYPE_K/V=q8_0` on 12 GB-class GPUs and verify the actual headroom with the platform GPU monitor.
 
 The Bundle `tool_calling` setting is authoritative. Bundles without this setting default safely to `disabled`. `doctor` reports candidates and inconsistencies but never rewrites a Bundle.
+
+Models with built-in MTP can be registered without a separate drafter file. `--spec-draft-n-max`
+sets the maximum number of draft tokens generated per speculative decoding step. Specify it when the
+model distributor recommends a value; omitting it preserves the llama-server default.
+
+```bash
+hoshikage add /models/qwen/Qwen3.5-9B.gguf qwen3.5-9b-mtp \
+  --mtp \
+  --spec-draft-n-max 6 \
+  --n-ctx 65536
+```
+
+Existing models with an external MTP drafter continue to use
+`--mtp-drafter /models/mtp.gguf`. `--spec-draft-n-max` cannot be used by itself. Check the
+Bundle-specific value with `hoshikage list --details` or `GET /v1/hoshikage/models`.
+
+Diffusion LLMs use a different generation algorithm from ordinary autoregressive models. Register
+them with `--diffusion`. This flag is not a performance tuning option. Even when the global setting
+is `HOSHIKAGE_RUNTIME_BACKEND=llama-server-managed`, Hoshikage routes only that Bundle through the
+existing Diffusion FFI path. Do not use this flag for ordinary models.
+
+```bash
+hoshikage add /models/elyza/ELYZA-Diffusion.gguf elyza-diffusion \
+  --diffusion \
+  --n-ctx 10240
+```
+
+When `max_output_tokens`, or Chat Completions `max_tokens`, is omitted, Hoshikage does not inject an
+arbitrary 1024- or 4096-token limit. The managed runtime receives no explicit limit. The FFI runtime
+uses the Bundle context remaining after the input. An explicitly supplied limit is still validated
+against the Bundle context.
 
 ### 2.2 Bundle diagnostics
 

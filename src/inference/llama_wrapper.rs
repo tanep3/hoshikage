@@ -868,7 +868,7 @@ impl LlamaWrapper {
 
             let mut generated_tokens = 0;
             let mut pending_bytes: Vec<u8> = Vec::new();
-            for _ in 0..params.max_tokens.min(4096_i32) {
+            for _ in 0..params.max_tokens {
                 let logits_ptr = llama_get_logits_ith(context, 0);
                 if logits_ptr.is_null() {
                     break;
@@ -1194,7 +1194,7 @@ impl LlamaWrapper {
             let mut generated_tokens = 0_i32;
             let mut draft_buf = vec![LLAMA_TOKEN_NULL; 16];
 
-            while generated_tokens < params.max_tokens.min(4096_i32) {
+            while generated_tokens < params.max_tokens {
                 let n_past = position;
                 let n_draft =
                     session.draft(seq_id, n_past, id_last, &prompt_tgt, &mut draft_buf)?;
@@ -1277,7 +1277,7 @@ impl LlamaWrapper {
                         }
                     }
 
-                    if generated_tokens >= params.max_tokens.min(4096_i32) {
+                    if generated_tokens >= params.max_tokens {
                         break;
                     }
                 }

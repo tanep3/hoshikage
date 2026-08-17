@@ -17,6 +17,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StreamOptions {
+    #[serde(default)]
+    pub include_usage: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
@@ -28,6 +34,8 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub stream: Option<bool>,
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
     #[serde(default)]
     pub stop: Option<Vec<String>>,
     #[serde(default)]
@@ -351,7 +359,7 @@ pub async fn chat_completion(
         );
     }
 
-    if manager.uses_managed_llama_server() {
+    if manager.uses_managed_llama_server_for(&model_config) {
         return managed_chat_completion(manager, req, model_config).await;
     }
 
@@ -398,12 +406,8 @@ pub async fn chat_completion(
 
     let max_tokens = req
         .max_tokens
-        .unwrap_or(if stream_response { 2096 } else { 1024 }) as i32;
-    let max_tokens = if stream_response {
-        max_tokens.min(2096)
-    } else {
-        max_tokens.min(1024)
-    };
+        .unwrap_or(i32::MAX as u32)
+        .min(i32::MAX as u32) as i32;
 
     let mut stop_sequences = vec![
         "<|im_start|>".to_string(),
@@ -633,14 +637,11 @@ fn build_managed_upstream_body(
         "top_p".to_string(),
         serde_json::json!(req.top_p.unwrap_or(manager.default_top_p())),
     );
-    object.insert(
-        "max_tokens".to_string(),
-        serde_json::json!(req.max_tokens.unwrap_or(if req.stream.unwrap_or(false) {
-            2096
-        } else {
-            1024
-        })),
-    );
+    if let Some(max_tokens) = req.max_tokens {
+        object.insert("max_tokens".to_string(), serde_json::json!(max_tokens));
+    } else {
+        object.remove("max_tokens");
+    }
     object.insert(
         "stop".to_string(),
         serde_json::json!(merged_stop_sequences(req.stop.as_deref(), model_config)),
@@ -1002,6 +1003,7 @@ mod tests {
             top_p: None,
             max_tokens: Some(100),
             stream: None,
+            stream_options: None,
             stop: None,
             presence_penalty: None,
             frequency_penalty: None,
@@ -1103,6 +1105,7 @@ mod tests {
             top_p: None,
             max_tokens: None,
             stream: None,
+            stream_options: None,
             stop: Some(vec!["<request-stop>".to_string()]),
             presence_penalty: None,
             frequency_penalty: None,
@@ -1118,7 +1121,7 @@ mod tests {
 
         assert!((body["temperature"].as_f64().unwrap() - 0.2).abs() < 0.0001);
         assert!((body["top_p"].as_f64().unwrap() - 0.8).abs() < 0.0001);
-        assert_eq!(body["max_tokens"], serde_json::json!(1024));
+        assert!(body.get("max_tokens").is_none());
         assert!(body["stop"]
             .as_array()
             .unwrap()
@@ -1145,6 +1148,7 @@ mod tests {
             top_p: None,
             max_tokens: None,
             stream: None,
+            stream_options: None,
             stop: None,
             presence_penalty: None,
             frequency_penalty: None,
@@ -1185,6 +1189,7 @@ mod tests {
             top_p: None,
             max_tokens: None,
             stream: None,
+            stream_options: None,
             stop: None,
             presence_penalty: None,
             frequency_penalty: None,

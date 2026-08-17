@@ -135,6 +135,8 @@ Phase 0 実施結果:
 - モデルを切り替えるたびに `.env` を書き換える設計を避けられる。
 - bundle を読むだけで、そのモデルの実行条件を追跡できる。
 
+`model_map.json` の更新は、admin API と CLI direct fallback のどちらも `ModelRegistry` の原子的保存へ集約する。更新後の完全な JSON を一時ファイルへ書き込み、`fsync` 後に rename する。対象ファイルを先に `truncate` してからロック・再読込してはならない。追加・削除の失敗やプロセス中断が起きても、直前の有効な snapshot を維持する。
+
 ### 4.2 `llama-server-managed` を第一 runtime とする
 
 Hoshikage の最新モデル機能は、`llama-server` を Hoshikage が子プロセスとして管理する runtime backend で実行する。
@@ -166,11 +168,59 @@ MTP と Draft model は speculative decoding 系だが、設定と失敗時挙�
 
 Hoshikage は MTP と Draft model の併用を独自に禁止しない。`llama-server` が受け付ける option 組み合わせを有効とし、受け付けない組み合わせは `doctor` または起動時診断で明示する。
 
-### 4.5 Thinking mode はユーザー向けには `--thinking-off` だけを公開する
+### 4.5 Thinking policy は Model Bundle が宣言する
 
-Thinking mode は、モデルや runtime によって control token、chat template kwargs、reasoning budget など実装差がある。ユーザーに細かい flag を露出すると運用が複雑になるため、CLI では `--thinking-off` のみを追加する。
+Thinking mode、reasoning token上限、最終回答として残すtoken量は、モデル、
+chat templateおよび利用目的によって異なる。runtime backendの固定値やモデル名による
+特殊分岐にせず、`ThinkingConfig`としてModel Bundleへ保存する。
 
-省略時は `auto` とし、モデル・chat template・runtime の既定動作に任せる。`--thinking-on` は追加しない。
+Thinking Onは低レイテンシ化の対象とはしない。ただし、有限なcontextをreasoningだけで
+消費して最終回答が空になることは正常完了ではない。`min_final_tokens`は速度制約ではなく、
+最終回答を成立させるための予約量として扱う。
+
+### 4.6 上位Provider向けモデルカタログ
+
+Hoshikageはモデル実行Providerであり、Agent Loopやモデル選択ポリシーは上位層が担当する。
+そのため、Hoshikageは登録済みBundleを一覧化する二つのAPIを提供する。
+
+| API | 用途 | 内容 |
+|---|---|---|
+| `GET /v1/models` | OpenAI互換Provider discovery | `data[].id`を中心とした公開カタログ |
+| `GET /v1/hoshikage/models` | Hoshikage-aware discovery | context、Tool、Vision、Thinking、reasoning budget等 |
+
+`/v1/models`の`data[].id`はResponses APIの`model`へそのまま渡せる値とする。
+`supported_reasoning_levels`は、Hoshikageがrequest単位のreasoning effortを解釈しない限り
+空配列を返す。Thinking On Bundleが存在することと、Codexのreasoning effortパラメータを
+受け付けることは別の能力であるため、能力を推測して広告してはならない。
+
+上位Proxyは`/v1/models`を起動時または明示refresh時に取得し、公開モデルIDを生成する。
+モデルの運用ポリシー（通常ChatでThinking On、バッチでThinking Off等）はProxy側で
+モデルIDを選択して実現し、Hoshikageはその選択を上書きしない。
+
+新規Thinking On Bundleの製品既定値は、`max_reasoning_tokens = 32768`、
+`min_final_tokens = 8192`とする。この値はGemma 4を含む特定モデルの推奨値ではなく、
+登録時に変更可能な運用既定値である。reasoningを固定長で制限したくないBundleは
+`max_reasoning_tokens = unlimited`を指定できる。
+
+### 4.6 llama-server option の所有者を分離する
+
+`llama-server`へ渡せる値を一律にglobal設定へ置かず、値の意味で所有者を決める。
+
+| 種別 | 所有者 | 例 |
+| --- | --- | --- |
+| モデル・Bundle固有 | `model_map.json` | context、GPU offload、thinking、MTP、mmproj、KV cache |
+| request固有 | Responses / Chat request | temperature、top_p、最大出力token数 |
+| machine / service固有 | Hoshikage環境設定 | listen address、認証、runtime path、log path |
+| managed runtime内部 | Hoshikage | 内部port、PID、health check、再起動制御 |
+
+requestで変更可能な値について、Model Bundleはモデル別の既定値を保持できるが、
+明示されたrequest値を優先する。
+
+Model Bundleのruntime optionは型付き構造として定義し、登録時、`doctor`、起動時に
+検証する。任意文字列の引数配列を標準インターフェースにすると、重複option、
+llama.cpp version差異、Hoshikage管理optionの上書きをコンパイル時に防げないため、
+主要な拡張方法にはしない。新しいllama-server optionは、型、検証規則、
+capability診断、command変換を一組として追加する。
 
 ---
 
@@ -207,10 +257,17 @@ Thinking mode は、モデルや runtime によって control token、chat templ
     "vision": true,
     "speculation": {
       "modes": ["mtp"],
+      "draft_n_max": 6,
       "fallback": "warn"
     },
     "thinking": {
-      "mode": "off"
+      "mode": "on",
+      "max_reasoning_tokens": null,
+      "min_final_tokens": 8192
+    },
+    "llama_server": {
+      "cache_type_k": "q8_0",
+      "cache_type_v": "q4_0"
     },
     "chat_template": null
   }
@@ -264,6 +321,8 @@ pub struct ModelBundleConfig {
     #[serde(default)]
     pub thinking: ThinkingConfig,
     #[serde(default)]
+    pub llama_server: LlamaServerModelConfig,
+    #[serde(default)]
     pub chat_template: Option<String>,
 }
 
@@ -290,16 +349,43 @@ pub enum FallbackMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThinkingConfig {
+    #[serde(default)]
     pub mode: ThinkingMode,
+    #[serde(default)]
+    pub max_reasoning_tokens: Option<u32>,
+    #[serde(default)]
+    pub min_final_tokens: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingMode {
     Auto,
+    On,
     Off,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LlamaServerModelConfig {
+    #[serde(default)]
+    pub cache_type_k: Option<KvCacheType>,
+    #[serde(default)]
+    pub cache_type_v: Option<KvCacheType>,
+    #[serde(default)]
+    pub threads: Option<u32>,
+    #[serde(default)]
+    pub threads_batch: Option<u32>,
+    #[serde(default)]
+    pub batch_size: Option<u32>,
+    #[serde(default)]
+    pub ubatch_size: Option<u32>,
+}
 ```
+
+`LlamaServerModelConfig`は対応済みoptionの初期集合であり、網羅リストではない。
+モデルごとの差異が必要なllama-server optionは、同じ型付き構造へ追加する。
+各fieldにはCLIまたはBundle設定入力、値検証、runtime capability診断、
+command変換および表示を対応させる。
 
 `LegacyModelConfig` は load 時に `ModelBundleConfig` へ正規化する。
 
@@ -321,6 +407,7 @@ pub struct RuntimeModelParams {
     pub n_gpu_layers: i32,
     pub speculation: SpeculationConfig,
     pub thinking: ThinkingConfig,
+    pub llama_server: LlamaServerModelConfig,
 }
 
 pub struct ModelCapabilities {
@@ -332,7 +419,26 @@ pub struct ModelCapabilities {
 
 `BundleResolver` は `base_path`、絶対パス、`MODEL_DIR` の優先順位を一箇所で処理する。runtime backend には解決済みの絶対パスだけを渡す。
 
-`ThinkingConfig::default()` は `Auto` とする。
+既存Bundleの読み込み互換を維持するため、`ThinkingConfig::default()` は
+`mode = Auto`、`max_reasoning_tokens = None`、`min_final_tokens = 0` とする。
+新規登録時に `--thinking-mode on` を指定し、詳細値を省略した場合は登録層が
+`max_reasoning_tokens = Some(32768)`、`min_final_tokens = 8192` を保存する。
+
+`None`はunlimitedを表す。requestごとの有効reasoning budgetは次で求める。
+
+```text
+generation_capacity =
+  min(request.max_output_tokens or context_remaining, context_remaining)
+
+reserve_limited_budget =
+  generation_capacity - min(thinking.min_final_tokens, generation_capacity)
+
+effective_reasoning_budget =
+  min(thinking.max_reasoning_tokens or unlimited, reserve_limited_budget)
+```
+
+`min_final_tokens`は最終回答の最大長ではない。reasoningが早く終了した場合、
+未使用のtokenはそのまま最終回答に使用できる。
 
 ### 5.4 llama.cpp runtime directory
 
@@ -648,6 +754,7 @@ pub struct LlamaServerLaunchRequest {
     pub n_gpu_layers: i32,
     pub speculation: SpeculationConfig,
     pub thinking: ThinkingConfig,
+    pub model_runtime: LlamaServerModelConfig,
     pub host: IpAddr,
     pub port: u16,
     pub runtime_dir: PathBuf,
@@ -662,6 +769,8 @@ pub trait RuntimeBackend {
 `LlamaServerManagedBackend` の責務:
 
 - bundle 設定から `llama-server` 起動 command を組み立てる。
+- Bundleの型付きruntime設定を、対応する`llama-server` optionへ変換する。
+- request入力token数の確定後、Thinking policyからrequest単位のreasoning budgetを計算する。
 - runtime directory 内の `llama-server` を起動する。
 - child process の pid、port、起動 command preview、health を保持する。
 - model switch 時は既存 child process を停止し、新しい child process を起動する。
@@ -729,12 +838,19 @@ impl SpeculationController {
 
 ### 8.4 ThinkingController
 
-`ThinkingController` は、Thinking mode の適用方針と出力 stripping を担当する。
+`ThinkingController` は、Thinking mode、requestごとのreasoning budget、
+最終回答予約および出力strippingの適用方針を担当する。
 
 責務:
 
 - `ThinkingConfig` と `RuntimeCapability` を照合する。
-- `auto` / `off` の実効 mode を決める。
+- `auto` / `on` / `off` の実効 mode を決める。
+- input token数、context上限、requestの最大出力token数から生成可能量を求める。
+- `max_reasoning_tokens` と `min_final_tokens` からrequest単位の有効reasoning budgetを求める。
+- `on` / `auto`で有効reasoning budgetが有限の場合、managed llama-serverの
+  request parameterへ反映する。
+- runtimeが有限reasoning budgetを受理できない場合、黙って無視せず診断または
+  request errorとして返す。
 - `off` の場合、chat template が生成した assistant 先頭の thinking 開始 marker を prompt から除去し、モデルを thought block 生成へ誘導しない。
 - `off` の場合、runtime が対応していれば reasoning budget 0 相当の設定を適用する。
 - `off` の場合に runtime が対応 option を提供しなければ、警告を記録して prompt / template policy と safety filter で続行する。
@@ -747,6 +863,7 @@ impl SpeculationController {
 - Speculation fallback 判定
 - Vision 入力解析
 - token generation loop
+- モデル名からのThinking policy推測
 
 型案:
 
@@ -754,7 +871,9 @@ impl SpeculationController {
 pub struct ThinkingDecision {
     pub effective_mode: ThinkingMode,
     pub strip_thinking: bool,
-    pub runtime_budget_tokens: Option<i32>,
+    pub max_reasoning_tokens: Option<u32>,
+    pub min_final_tokens: u32,
+    pub launch_budget_tokens: Option<i32>,
     pub diagnostic: Option<String>,
 }
 
@@ -764,7 +883,14 @@ impl ThinkingController {
     pub fn decide(
         config: &ThinkingConfig,
         capabilities: &RuntimeCapability,
-    ) -> ThinkingDecision;
+    ) -> Result<ThinkingDecision>;
+
+    pub fn budget_for_request(
+        decision: &ThinkingDecision,
+        context_window: u32,
+        input_tokens: u32,
+        requested_max_output_tokens: Option<u32>,
+    ) -> Result<Option<u32>>;
 
     pub fn apply_prompt_policy_if_needed(
         decision: &ThinkingDecision,
@@ -778,9 +904,18 @@ impl ThinkingController {
 }
 ```
 
-`strip_thinking` は `off` のとき true とする。ただしこれは主制御ではなく、prompt policy / managed runtime で Thinking を生成させない設定を適用した後の safety filter である。`auto` では、Hoshikage が生成した過去 assistant message を次 turn の context に戻す際に thought block を混ぜないため、必要に応じて内部履歴用の stripping を行う。
+`strip_thinking` は `off` のとき true とする。ただしこれは主制御ではなく、
+prompt policy / managed runtimeでThinkingを生成させない設定を適用した後の
+safety filterである。`auto` / `on`でも、過去assistant messageを次turnのcontextへ
+戻す際には、GoogleのGemma 4推奨に従ってthought blockを履歴へ混ぜない。
 
-Phase 3 実装では、Hoshikage 側の prompt policy と safety filter を先に実装する。`llama-server` が reasoning budget または thinking control 相当の option を提供する場合は、`LlamaServerLaunchRequest` または request body へ反映する。runtime 側で直接制御できない場合でもエラーにはせず、警告を記録して続行する。Thinking off の主制御は thought block を生成させない prompt / template policy とし、出力 stripping は safety filter として扱う。
+Thinking Offの固定budget 0は起動optionとして適用できる。Thinking On / Autoの
+動的budgetは、入力token数が確定した後にrequest bodyへ反映する。起動時に有限budgetを
+固定するとrequestごとの最終回答予約量を保証できないため、動的policyを持つBundleでは
+process全体へ正数のbudgetを固定しない。
+
+Thinking Offの主制御はthought blockを生成させないprompt / template policyとし、
+出力strippingはsafety filterとして扱う。
 
 ### 8.5 Runtime backend 抽象
 
@@ -899,7 +1034,16 @@ pub struct RamdiskBundleState {
 | `warn` | 警告して通常推論 |
 | `off` | 最初から使わない |
 
-### 10.3 Fallback 判定
+### 10.3 Draft token上限
+
+`speculation.draft_n_max`は、1回のspeculative decodingで生成するdraft token数の上限を
+Bundleごとに指定する。型は0を表現できない`Option<NonZeroU32>`とし、指定時はmanaged
+llama-serverの`--spec-draft-n-max`へ変換する。未指定時は上流runtimeの既定値を使用する。
+
+`draft_n_max`はMTPまたはDraft model modeが有効な場合だけ意味を持つ。CLIと管理APIはmodeなしの
+指定を明示エラーにし、値を黙って無視しない。
+
+### 10.4 Fallback 判定
 
 ```text
 speculation.modes contains mtp
@@ -916,7 +1060,7 @@ speculation.modes contains draft_model
 
 Vision 不整合は fallback しない。
 
-### 10.4 Fallback の通知
+### 10.5 Fallback の通知
 
 fallback が発生した場合、次の全てに記録する。
 
@@ -1024,15 +1168,26 @@ hoshikage list
 hoshikage add /models/main.gguf <LABEL> \
   --mmproj /models/mmproj.gguf \
   --draft /models/draft.gguf \
+  --spec-draft-n-max 6 \
   --n-ctx 8192 \
   --n-gpu-layers -1 \
   --vision \
   --speculation mtp \
   --fallback warn \
-  --thinking-off
+  --thinking-mode on \
+  --max-reasoning-tokens unlimited \
+  --min-final-tokens 8192
 ```
 
 `--speculation` は複数回指定できる。例: `--speculation mtp --speculation draft_model`。併用可否は `llama-server` の対応に準拠し、Hoshikage 側で独自に禁止しない。
+
+内蔵MTPモデルはdrafter fileを指定せず、次のように登録する。
+
+```bash
+hoshikage add /models/qwen/main.gguf qwen-mtp \
+  --mtp \
+  --spec-draft-n-max 6
+```
 
 ```bash
 hoshikage doctor
@@ -1043,7 +1198,18 @@ hoshikage list --details
 
 `add-bundle` は新設しない。既存 `add` に option を追加し、学習コストを抑える。
 
-Thinking mode のユーザー向け CLI は `--thinking-off` のみ追加する。省略時は `auto` とする。
+Thinking policyは次のCLI optionで登録する。
+
+```text
+--thinking-mode <auto|on|off>
+--max-reasoning-tokens <N|unlimited>
+--min-final-tokens <N>
+```
+
+`--thinking-off`は`--thinking-mode off`の後方互換aliasとして維持する。
+`--thinking-off`と矛盾するThinking optionを同時指定した場合は明示エラーとする。
+省略時は既存互換のため`auto`とする。`on`で詳細値を省略した場合だけ、
+製品既定値の32768 / 8192を登録する。
 
 複雑な bundle を手で指定しづらい場合は、設定ファイル読み込みを追加する。
 
@@ -1075,7 +1241,9 @@ hoshikage add --bundle-config /path/to/bundle.json
 - 既存 `ModelConfig` を拡張し、bundle fields を保持できるようにする。
 - 既存 `path` field は deserialize alias として残し、保存時は `base_path` に寄せる。
 - `model_map.json` v1/v2 両対応。
-- `hoshikage add` に `--mmproj`, `--mtp-drafter`, `--draft-model`, `--thinking-off`, `--n-ctx`, `--n-gpu-layers` を追加。
+- `hoshikage add` に `--mmproj`, `--mtp-drafter`, `--draft-model`,
+  `--thinking-mode`, `--max-reasoning-tokens`, `--min-final-tokens`,
+  `--thinking-off`, `--n-ctx`, `--n-gpu-layers` を追加。
 - `--mtp-drafter` と `--draft-model` の同時指定は設定エラーにする。
 - `hoshikage list --details` で bundle 概要を表示。
 - Runtime への bundle 接続は Phase 6 以降で行う。
@@ -1090,8 +1258,11 @@ hoshikage add --bundle-config /path/to/bundle.json
 ### Phase 3: Thinking mode 制御
 
 - `ThinkingConfig` を追加。
-- `hoshikage add --thinking-off` を追加。
+- `ThinkingMode::On`、reasoning上限、最終回答予約量を追加。
+- `hoshikage add --thinking-mode`, `--max-reasoning-tokens`,
+  `--min-final-tokens`, `--thinking-off` を追加。
 - `ThinkingController` を追加。
+- request単位の有効reasoning budget計算を追加。
 - prompt policy と safety filter を実装。
 - status / doctor / log に Thinking mode 状態を出す。
 
@@ -1171,6 +1342,7 @@ hoshikage add --bundle-config /path/to/bundle.json
 
 - legacy `model_map.json` deserialize
 - bundle `model_map.json` deserialize
+- CLI direct add/remove 後も既存 Bundle と有効な JSON snapshot を維持
 - legacy -> bundle normalization
 - Chat content string / parts deserialize
 - data URL parse

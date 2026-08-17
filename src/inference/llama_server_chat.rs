@@ -65,12 +65,19 @@ pub fn build_chat_request(
         "stream": request.stream,
         "temperature": request.sampling.temperature.unwrap_or(defaults.temperature),
         "top_p": request.sampling.top_p.unwrap_or(defaults.top_p),
-        "max_tokens": request.max_output_tokens,
         "repeat_penalty": defaults.repeat_penalty,
         "stop": stop,
     });
+    if let Some(max_output_tokens) = request.max_output_tokens {
+        body["max_tokens"] = serde_json::json!(max_output_tokens);
+    }
     if model_config.thinking.mode == ThinkingMode::Off {
         body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
+    } else if model_config.thinking.mode == ThinkingMode::On {
+        body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": true });
+        if let Some(budget) = model_config.thinking.max_reasoning_tokens {
+            body["thinking_budget_tokens"] = serde_json::json!(budget);
+        }
     }
     if request.stream {
         body["stream_options"] = serde_json::json!({ "include_usage": true });
@@ -289,7 +296,7 @@ mod tests {
             tools: ModelToolSet::default(),
             tool_choice: ToolChoice::None,
             sampling: SamplingOptions::default(),
-            max_output_tokens: 64,
+            max_output_tokens: Some(64),
             stream: false,
         }
     }
@@ -326,7 +333,7 @@ mod tests {
             }]),
             tool_choice: ToolChoice::Auto,
             sampling: SamplingOptions::default(),
-            max_output_tokens: 64,
+            max_output_tokens: Some(64),
             stream: false,
         }
     }
@@ -361,6 +368,51 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn adapter_omits_max_tokens_when_the_client_does_not_set_a_limit() {
+        let config =
+            ModelConfig::new_legacy("/models".to_string(), "model.gguf".to_string(), Vec::new());
+        let mut request = request();
+        request.max_output_tokens = None;
+
+        let body = build_chat_request(
+            &ModelId::new("gemma4").unwrap(),
+            &request,
+            &config,
+            &LlamaServerChatDefaults {
+                temperature: 0.2,
+                top_p: 0.8,
+                repeat_penalty: 1.1,
+            },
+        )
+        .unwrap();
+
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn adapter_applies_thinking_on_and_bundle_reasoning_budget() {
+        let mut config =
+            ModelConfig::new_legacy("/models".to_string(), "model.gguf".to_string(), Vec::new());
+        config.thinking.mode = ThinkingMode::On;
+        config.thinking.max_reasoning_tokens = Some(32_768);
+
+        let body = build_chat_request(
+            &ModelId::new("gemma4").unwrap(),
+            &request(),
+            &config,
+            &LlamaServerChatDefaults {
+                temperature: 0.2,
+                top_p: 0.8,
+                repeat_penalty: 1.1,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(body["thinking_budget_tokens"], 32_768);
     }
 
     #[test]

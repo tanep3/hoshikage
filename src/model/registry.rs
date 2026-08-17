@@ -154,6 +154,8 @@ mod tests {
             drafter: None,
             speculation: SpeculationConfig::default(),
             thinking: ThinkingConfig::default(),
+            llama_server: crate::model::LlamaServerModelConfig::default(),
+            generation: crate::model::GenerationMode::Autoregressive,
             tool_calling: crate::model::ToolCallingConfig::default(),
             n_ctx: Some(16384),
             n_gpu_layers: Some(0),

@@ -13,6 +13,8 @@ pub struct ModelData {
     pub object: String,
     pub created: i64,
     pub owned_by: String,
+    #[serde(default)]
+    pub supported_reasoning_levels: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,6 +127,7 @@ pub async fn models(
             object: "model".to_string(),
             created: 1686935002,
             owned_by: "tane".to_string(),
+            supported_reasoning_levels: Vec::new(),
         })
         .collect();
     let models = model_infos
@@ -144,6 +147,8 @@ pub struct StatusResponse {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<crate::model::RuntimeStatusSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inference_metrics: Option<crate::model::InferenceMetricsSnapshot>,
 }
 
 pub async fn status(
@@ -152,6 +157,7 @@ pub async fn status(
     Json(StatusResponse {
         status: "ok".to_string(),
         runtime: Some(manager.runtime_status()),
+        inference_metrics: manager.inference_metrics(),
     })
 }
 
@@ -213,6 +219,7 @@ mod tests {
             object: "model".to_string(),
             created: 1686935002,
             owned_by: "tane".to_string(),
+            supported_reasoning_levels: Vec::new(),
         };
 
         let json = serde_json::to_string(&data).unwrap();
@@ -228,6 +235,7 @@ mod tests {
                 object: "model".to_string(),
                 created: 1686935002,
                 owned_by: "tane".to_string(),
+                supported_reasoning_levels: Vec::new(),
             }],
             models: vec![CodexModelData::new(
                 "test-model".to_string(),
@@ -261,6 +269,7 @@ mod tests {
         let response = StatusResponse {
             status: "ok".to_string(),
             runtime: None,
+            inference_metrics: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();

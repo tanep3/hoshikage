@@ -30,3 +30,4 @@ Hoshikageの正規ドキュメントと作業記録への入口です。
 - [非機能要件詳細](nfr-details.md)
 - [Model Runtime Revision 要件](model-runtime-revision-requirements.md)
 - [Model Runtime Revision 設計](model-runtime-revision-system-design.md)
+- [Model Runtime Regression調査 (2026-07-30)](research/model-runtime-regression-2026-07-30.md)

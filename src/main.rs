@@ -8,9 +8,10 @@ use hoshikage::commands::{
 use hoshikage::config::Config;
 use hoshikage::error::HoshikageError;
 use hoshikage::i18n::Language;
-use hoshikage::model::ModelManager;
+use hoshikage::model::{ModelManager, ThinkingMode};
 #[cfg(unix)]
 use std::fs::OpenOptions;
+use std::num::NonZeroU32;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
@@ -38,12 +39,28 @@ enum Commands {
         label: String,
         #[arg(long, value_name = "PATH")]
         mmproj: Option<String>,
+        #[arg(long)]
+        mtp: bool,
         #[arg(long, value_name = "PATH")]
         mtp_drafter: Option<String>,
         #[arg(long, value_name = "PATH")]
         draft_model: Option<String>,
+        #[arg(long, value_name = "N")]
+        spec_draft_n_max: Option<NonZeroU32>,
         #[arg(long)]
         thinking_off: bool,
+        #[arg(long, value_enum)]
+        thinking_mode: Option<ThinkingModeArg>,
+        #[arg(long, value_name = "N|unlimited")]
+        max_reasoning_tokens: Option<String>,
+        #[arg(long, value_name = "N")]
+        min_final_tokens: Option<u32>,
+        #[arg(long)]
+        diffusion: bool,
+        #[arg(long, value_name = "TYPE")]
+        cache_type_k: Option<String>,
+        #[arg(long, value_name = "TYPE")]
+        cache_type_v: Option<String>,
         #[arg(long, value_name = "N")]
         n_ctx: Option<u32>,
         #[arg(long, value_name = "N", allow_hyphen_values = true)]
@@ -102,6 +119,23 @@ enum LanguageArg {
     Ja,
 }
 
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+enum ThinkingModeArg {
+    Auto,
+    On,
+    Off,
+}
+
+impl From<ThinkingModeArg> for ThinkingMode {
+    fn from(value: ThinkingModeArg) -> Self {
+        match value {
+            ThinkingModeArg::Auto => Self::Auto,
+            ThinkingModeArg::On => Self::On,
+            ThinkingModeArg::Off => Self::Off,
+        }
+    }
+}
+
 impl From<LanguageArg> for Language {
     fn from(value: LanguageArg) -> Self {
         match value {
@@ -158,9 +192,17 @@ async fn main() -> hoshikage::Result<()> {
                 path,
                 label,
                 mmproj,
+                mtp,
                 mtp_drafter,
                 draft_model,
+                spec_draft_n_max,
                 thinking_off,
+                thinking_mode,
+                max_reasoning_tokens,
+                min_final_tokens,
+                diffusion,
+                cache_type_k,
+                cache_type_v,
                 n_ctx,
                 n_gpu_layers,
                 check,
@@ -170,9 +212,17 @@ async fn main() -> hoshikage::Result<()> {
                     path,
                     stop_words,
                     mmproj,
+                    mtp,
                     mtp_drafter,
                     draft_model,
+                    spec_draft_n_max,
                     thinking_off,
+                    thinking_mode: thinking_mode.map(Into::into),
+                    max_reasoning_tokens,
+                    min_final_tokens,
+                    diffusion,
+                    cache_type_k,
+                    cache_type_v,
                     n_ctx,
                     n_gpu_layers,
                     check,
@@ -269,7 +319,11 @@ async fn main() -> hoshikage::Result<()> {
 
     tracing::info!("Hoshikage server starting on {}:{}", config.host, port);
 
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

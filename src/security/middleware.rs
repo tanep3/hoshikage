@@ -1,10 +1,11 @@
 use super::{AuthPolicy, FileTokenStore, SecretToken, TokenStore};
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -30,7 +31,11 @@ pub async fn authenticate(
     request: Request,
     next: Next,
 ) -> Response {
-    if !state.policy.requires_bearer() {
+    let is_loopback = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|ConnectInfo(address)| address.ip().is_loopback());
+    if !state.policy.requires_bearer() || is_loopback {
         return next.run(request).await;
     }
 

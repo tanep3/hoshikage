@@ -15,6 +15,7 @@ use crate::runtime::{RuntimeCoordinator, RuntimeEndpoint, RuntimeLease};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -36,6 +37,8 @@ pub struct ModelConfig {
     pub speculation: SpeculationConfig,
     #[serde(default)]
     pub thinking: ThinkingConfig,
+    #[serde(default, skip_serializing_if = "GenerationMode::is_autoregressive")]
+    pub generation: GenerationMode,
     #[serde(
         default,
         skip_serializing_if = "ToolCallingConfig::is_disabled_default"
@@ -45,6 +48,36 @@ pub struct ModelConfig {
     pub n_ctx: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n_gpu_layers: Option<i32>,
+    #[serde(default, skip_serializing_if = "LlamaServerModelConfig::is_default")]
+    pub llama_server: LlamaServerModelConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LlamaServerModelConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_type_k: Option<crate::config::KvCacheType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_type_v: Option<crate::config::KvCacheType>,
+}
+
+impl LlamaServerModelConfig {
+    fn is_default(value: &Self) -> bool {
+        value == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationMode {
+    #[default]
+    Autoregressive,
+    Diffusion,
+}
+
+impl GenerationMode {
+    fn is_autoregressive(&self) -> bool {
+        *self == Self::Autoregressive
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,6 +88,8 @@ pub struct SpeculationConfig {
         deserialize_with = "deserialize_speculation_modes"
     )]
     pub modes: Vec<SpeculationMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_n_max: Option<NonZeroU32>,
     #[serde(default)]
     pub fallback: FallbackMode,
 }
@@ -63,6 +98,7 @@ impl Default for SpeculationConfig {
     fn default() -> Self {
         Self {
             modes: Vec::new(),
+            draft_n_max: None,
             fallback: FallbackMode::Warn,
         }
     }
@@ -200,8 +236,8 @@ fn ensure_ramdisk_capacity(path: &std::path::Path, required_bytes: u64) -> Resul
     Ok(())
 }
 
-fn validate_output_token_limit(max_output_tokens: u32, n_ctx: u32) -> Result<()> {
-    if max_output_tokens > n_ctx {
+fn validate_output_token_limit(max_output_tokens: Option<u32>, n_ctx: u32) -> Result<()> {
+    if max_output_tokens.is_some_and(|limit| limit > n_ctx) {
         return Err(crate::error::HoshikageError::ContextLengthExceeded);
     }
     Ok(())
@@ -314,7 +350,7 @@ async fn execute_buffered_json_stream_retry(
         .await
         .map_err(|_| crate::error::HoshikageError::ResponseTranslationFailed)?
         .input_tokens;
-    if input_tokens.saturating_add(request.max_output_tokens) > limits.context_window {
+    if input_tokens.saturating_add(request.max_output_tokens.unwrap_or(0)) > limits.context_window {
         return Err(crate::error::HoshikageError::ContextLengthExceeded);
     }
 
@@ -354,6 +390,8 @@ mod stream_retry_tests {
             drafter: None,
             speculation: SpeculationConfig::default(),
             thinking: ThinkingConfig::default(),
+            llama_server: LlamaServerModelConfig::default(),
+            generation: GenerationMode::Autoregressive,
             tool_calling: ToolCallingConfig {
                 mode: crate::model::ToolCallingMode::Native,
                 fallback: crate::model::ToolFallback::Json,
@@ -694,12 +732,22 @@ pub enum FallbackMode {
 pub struct ThinkingConfig {
     #[serde(default)]
     pub mode: ThinkingMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_reasoning_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub min_final_tokens: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl Default for ThinkingConfig {
     fn default() -> Self {
         Self {
             mode: ThinkingMode::Auto,
+            max_reasoning_tokens: None,
+            min_final_tokens: 0,
         }
     }
 }
@@ -709,6 +757,7 @@ impl Default for ThinkingConfig {
 pub enum ThinkingMode {
     #[default]
     Auto,
+    On,
     Off,
 }
 
@@ -722,14 +771,26 @@ impl ModelConfig {
             drafter: None,
             speculation: SpeculationConfig::default(),
             thinking: ThinkingConfig::default(),
+            generation: GenerationMode::Autoregressive,
             tool_calling: ToolCallingConfig::default(),
             n_ctx: None,
             n_gpu_layers: None,
+            llama_server: LlamaServerModelConfig::default(),
         }
     }
 
     pub fn main_model_path(&self) -> PathBuf {
         PathBuf::from(&self.path).join(&self.model)
+    }
+}
+
+fn effective_runtime_backend(
+    configured: RuntimeBackendKind,
+    generation: GenerationMode,
+) -> RuntimeBackendKind {
+    match generation {
+        GenerationMode::Diffusion => RuntimeBackendKind::LlamaFfi,
+        GenerationMode::Autoregressive => configured,
     }
 }
 
@@ -739,11 +800,51 @@ mod config_tests {
 
     #[test]
     fn output_token_limit_cannot_exceed_model_context() {
-        assert!(validate_output_token_limit(4096, 4096).is_ok());
+        assert!(validate_output_token_limit(Some(4096), 4096).is_ok());
+        assert!(validate_output_token_limit(None, 4096).is_ok());
         assert!(matches!(
-            validate_output_token_limit(4097, 4096),
+            validate_output_token_limit(Some(4097), 4096),
             Err(crate::error::HoshikageError::ContextLengthExceeded)
         ));
+    }
+
+    #[test]
+    fn diffusion_bundle_uses_ffi_even_when_managed_runtime_is_global_default() {
+        assert_eq!(
+            effective_runtime_backend(
+                RuntimeBackendKind::LlamaServerManaged,
+                GenerationMode::Diffusion
+            ),
+            RuntimeBackendKind::LlamaFfi
+        );
+        assert_eq!(
+            effective_runtime_backend(
+                RuntimeBackendKind::LlamaServerManaged,
+                GenerationMode::Autoregressive
+            ),
+            RuntimeBackendKind::LlamaServerManaged
+        );
+    }
+
+    #[test]
+    fn model_metadata_exposes_bundle_thinking_budget() {
+        let mut config = ModelConfig::new_legacy(
+            "/models".to_string(),
+            "thinking.gguf".to_string(),
+            Vec::new(),
+        );
+        config.thinking = ThinkingConfig {
+            mode: ThinkingMode::On,
+            max_reasoning_tokens: Some(32_768),
+            min_final_tokens: 8_192,
+        };
+
+        let info = HoshikageModelInfo::from_bundle("thinking".to_string(), config, 32_768, false);
+
+        assert_eq!(info.thinking, ThinkingMode::On);
+        assert_eq!(info.max_reasoning_tokens, Some(32_768));
+        assert_eq!(info.min_final_tokens, 8_192);
+        assert!(info.reasoning);
     }
 
     #[test]
@@ -794,6 +895,7 @@ mod config_tests {
             "drafter": "mtp.gguf",
             "speculation": {
                 "mode": "mtp",
+                "draft_n_max": 6,
                 "fallback": "warn"
             },
             "thinking": {
@@ -813,9 +915,27 @@ mod config_tests {
         assert_eq!(config.mmproj.as_deref(), Some("mmproj.gguf"));
         assert_eq!(config.drafter.as_deref(), Some("mtp.gguf"));
         assert!(config.speculation.has_mode(SpeculationMode::Mtp));
+        assert_eq!(
+            config.speculation.draft_n_max.map(|value| value.get()),
+            Some(6)
+        );
         assert_eq!(config.thinking.mode, ThinkingMode::Off);
         assert_eq!(config.n_ctx, Some(8192));
         assert_eq!(config.n_gpu_layers, Some(-1));
+    }
+
+    #[test]
+    fn speculation_draft_n_max_rejects_zero() {
+        let json = r#"{
+            "base_path": "/models/qwen",
+            "model": "main.gguf",
+            "speculation": {
+                "modes": ["mtp"],
+                "draft_n_max": 0
+            }
+        }"#;
+
+        assert!(serde_json::from_str::<ModelConfig>(json).is_err());
     }
 
     #[test]
@@ -860,7 +980,7 @@ mod vision_request_tests {
             tools: ModelToolSet::default(),
             tool_choice: ToolChoice::None,
             sampling: SamplingOptions::default(),
-            max_output_tokens: 64,
+            max_output_tokens: Some(64),
             stream: false,
         }
     }
@@ -886,7 +1006,7 @@ mod vision_request_tests {
             tools: ModelToolSet::default(),
             tool_choice: ToolChoice::None,
             sampling: SamplingOptions::default(),
-            max_output_tokens: 64,
+            max_output_tokens: Some(64),
             stream: true,
         }
     }
@@ -1049,6 +1169,18 @@ pub struct RuntimeStatusSnapshot {
     pub active_requests: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct InferenceMetricsSnapshot {
+    pub model: String,
+    pub tool_calling_mode: crate::model::ToolCallingMode,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub total_elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
+    pub generation_tokens_per_second: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LoadedRuntimeInfoSnapshot {
     pub main_model_loaded: bool,
@@ -1068,6 +1200,7 @@ pub struct LoadedRuntimeInfoSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HoshikageModelInfo {
     pub id: String,
+    pub generation: GenerationMode,
     pub context_window: u32,
     pub codex_compatible: bool,
     pub responses: bool,
@@ -1079,7 +1212,12 @@ pub struct HoshikageModelInfo {
     pub mmproj_configured: bool,
     pub mtp_configured: bool,
     pub draft_model_configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_draft_n_max: Option<u32>,
     pub thinking: ThinkingMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_reasoning_tokens: Option<u32>,
+    pub min_final_tokens: u32,
     pub fallback: FallbackMode,
     pub reasoning: bool,
     pub tool_calling_mode: crate::model::ToolCallingMode,
@@ -1110,8 +1248,10 @@ impl HoshikageModelInfo {
         default_context_window: u32,
         responses_vision_enabled: bool,
     ) -> Self {
+        let reasoning = config.thinking.mode != ThinkingMode::Off;
         Self {
             id,
+            generation: config.generation,
             context_window: crate::codex::effective_context_window(&config, default_context_window),
             codex_compatible: crate::codex::is_codex_compatible(&config, default_context_window),
             responses: true,
@@ -1125,9 +1265,12 @@ impl HoshikageModelInfo {
             mtp_configured: config.speculation.has_mode(SpeculationMode::Mtp),
             draft_model_configured: config.speculation.has_mode(SpeculationMode::DraftModel)
                 && config.drafter.is_some(),
+            spec_draft_n_max: config.speculation.draft_n_max.map(NonZeroU32::get),
             thinking: config.thinking.mode,
+            max_reasoning_tokens: config.thinking.max_reasoning_tokens,
+            min_final_tokens: config.thinking.min_final_tokens,
             fallback: config.speculation.fallback,
-            reasoning: false,
+            reasoning,
             tool_calling_mode: config.tool_calling.mode,
             tool_parser: config.tool_calling.effective_parser(),
         }
@@ -1189,6 +1332,95 @@ pub struct ModelManager {
     semaphore: Arc<Semaphore>,
     managed_runtime: RuntimeCoordinator,
     llama_server_client: LlamaServerClient,
+    metrics: Arc<Mutex<Option<InferenceMetricsSnapshot>>>,
+}
+
+fn apply_reasoning_budget(
+    body: &mut serde_json::Value,
+    config: &ModelConfig,
+    request: &ModelRequest,
+    plan: ContextPlan,
+) {
+    if config.thinking.mode == ThinkingMode::Off {
+        return;
+    }
+
+    let remaining = plan.context_window.saturating_sub(plan.input_tokens);
+    let generation_capacity = request
+        .max_output_tokens
+        .map_or(remaining, |limit| limit.min(remaining));
+    let reserved_final = config.thinking.min_final_tokens.min(generation_capacity);
+    let available_for_reasoning = generation_capacity.saturating_sub(reserved_final);
+    let effective_budget = config
+        .thinking
+        .max_reasoning_tokens
+        .map_or(available_for_reasoning, |limit| {
+            limit.min(available_for_reasoning)
+        });
+
+    if config.thinking.max_reasoning_tokens.is_some()
+        || config.thinking.min_final_tokens > 0
+        || config.thinking.mode == ThinkingMode::On
+    {
+        body["thinking_budget_tokens"] = serde_json::json!(effective_budget);
+    }
+}
+
+fn completion_usage(completion: &ModelCompletion) -> TokenUsage {
+    match completion {
+        ModelCompletion::Text { usage, .. } | ModelCompletion::ToolCall { usage, .. } => {
+            usage.clone()
+        }
+    }
+}
+
+fn log_generation_metrics(
+    metrics: &Arc<Mutex<Option<InferenceMetricsSnapshot>>>,
+    model: &crate::conversation::ModelId,
+    mode: crate::model::ToolCallingMode,
+    elapsed: Duration,
+    first_token_elapsed: Option<Duration>,
+    usage: TokenUsage,
+) {
+    let (input_tokens, output_tokens) = match usage {
+        TokenUsage::Measured {
+            input_tokens,
+            output_tokens,
+        }
+        | TokenUsage::Estimated {
+            input_tokens,
+            output_tokens,
+        } => (input_tokens, output_tokens),
+    };
+    let elapsed_seconds = elapsed.as_secs_f64();
+    let generation_tokens_per_second = if elapsed_seconds > 0.0 {
+        f64::from(output_tokens) / elapsed_seconds
+    } else {
+        0.0
+    };
+    let snapshot = InferenceMetricsSnapshot {
+        model: model.as_str().to_string(),
+        tool_calling_mode: mode,
+        input_tokens,
+        output_tokens,
+        total_elapsed_ms: elapsed.as_millis() as u64,
+        ttft_ms: first_token_elapsed.map(|value| value.as_millis() as u64),
+        generation_tokens_per_second,
+    };
+    if let Ok(mut current) = metrics.lock() {
+        *current = Some(snapshot.clone());
+    }
+    tracing::info!(
+        target: "hoshikage::metrics",
+        model = model.as_str(),
+        tool_calling_mode = ?mode,
+        input_tokens,
+        output_tokens,
+        total_elapsed_ms = snapshot.total_elapsed_ms,
+        ttft_ms = snapshot.ttft_ms,
+        generation_tokens_per_second = snapshot.generation_tokens_per_second,
+        "inference metrics"
+    );
 }
 
 impl ModelManager {
@@ -1213,7 +1445,12 @@ impl ModelManager {
             semaphore: Arc::new(Semaphore::new(1)),
             managed_runtime,
             llama_server_client: LlamaServerClient::new(),
+            metrics: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn inference_metrics(&self) -> Option<InferenceMetricsSnapshot> {
+        self.metrics.lock().ok().and_then(|metrics| metrics.clone())
     }
 
     pub async fn send_managed_chat(
@@ -1279,10 +1516,10 @@ impl ModelManager {
 
     pub async fn list_hoshikage_models(&self) -> Vec<HoshikageModelInfo> {
         let models = self.registry.snapshot().await;
-        let responses_vision_enabled = self.uses_managed_llama_server();
         let mut data = models
             .into_iter()
             .map(|(name, config)| {
+                let responses_vision_enabled = self.uses_managed_llama_server_for(&config);
                 HoshikageModelInfo::from_bundle(
                     name,
                     config,
@@ -1299,20 +1536,18 @@ impl ModelManager {
         let config = self.get_model(name).await?;
         Ok(HoshikageModelInfo::from_bundle(
             name.to_string(),
-            config,
+            config.clone(),
             self.config.n_ctx,
-            self.uses_managed_llama_server(),
+            self.uses_managed_llama_server_for(&config),
         ))
     }
 
     pub async fn responses_vision_available(&self) -> bool {
-        self.uses_managed_llama_server()
-            && self
-                .registry
-                .snapshot()
-                .await
-                .values()
-                .any(|config| config.mmproj.is_some())
+        self.registry
+            .snapshot()
+            .await
+            .values()
+            .any(|config| config.mmproj.is_some() && self.uses_managed_llama_server_for(config))
     }
 
     pub fn runtime_status(&self) -> RuntimeStatusSnapshot {
@@ -1378,6 +1613,11 @@ impl ModelManager {
 
     pub fn uses_managed_llama_server(&self) -> bool {
         self.config.runtime_backend == RuntimeBackendKind::LlamaServerManaged
+    }
+
+    pub fn uses_managed_llama_server_for(&self, model: &ModelConfig) -> bool {
+        effective_runtime_backend(self.config.runtime_backend, model.generation)
+            == RuntimeBackendKind::LlamaServerManaged
     }
 
     pub fn responses_unknown_field_policy(&self) -> crate::config::UnknownFieldPolicy {
@@ -1653,7 +1893,7 @@ impl ModelManager {
         &self,
         model_name: &str,
         prompt: &str,
-        params: InferenceParams,
+        mut params: InferenceParams,
     ) -> Result<(String, u32, u32)> {
         let _permit =
             self.semaphore.clone().acquire_owned().await.map_err(|e| {
@@ -1680,6 +1920,14 @@ impl ModelManager {
         })?;
 
         let prompt_tokens = backend.count_tokens(prompt)? as u32;
+        let context_window = model_config.n_ctx.unwrap_or(self.config.n_ctx);
+        let available_output_tokens = context_window.saturating_sub(prompt_tokens);
+        if available_output_tokens == 0 {
+            return Err(crate::error::HoshikageError::ContextLengthExceeded);
+        }
+        params.max_tokens = params
+            .max_tokens
+            .min(available_output_tokens.min(i32::MAX as u32) as i32);
 
         if backend.is_diffusion_model()? {
             tracing::info!("Using diffusion generation for model: {}", model_name);
@@ -1721,7 +1969,7 @@ impl ModelManager {
     ) -> Result<ModelCompletion> {
         let model_config = self.get_model(model.as_str()).await?;
         let has_vision_input = validate_vision_request(&request, &model_config)?;
-        if has_vision_input && !self.uses_managed_llama_server() {
+        if has_vision_input && !self.uses_managed_llama_server_for(&model_config) {
             return Err(crate::error::HoshikageError::VisionNotSupported);
         }
         validate_tool_request(&request, &model_config)?;
@@ -1741,7 +1989,7 @@ impl ModelManager {
             request.max_output_tokens,
             model_config.n_ctx.unwrap_or(self.config.n_ctx),
         )?;
-        if self.uses_managed_llama_server() {
+        if self.uses_managed_llama_server_for(&model_config) {
             let defaults = LlamaServerChatDefaults {
                 temperature: self.default_temperature(),
                 top_p: self.default_top_p(),
@@ -1828,7 +2076,10 @@ impl ModelManager {
                 .temperature
                 .unwrap_or(self.default_temperature()),
             top_p: request.sampling.top_p.unwrap_or(self.default_top_p()),
-            max_tokens: request.max_output_tokens.min(i32::MAX as u32) as i32,
+            max_tokens: request
+                .max_output_tokens
+                .unwrap_or(i32::MAX as u32)
+                .min(i32::MAX as u32) as i32,
             stop_sequences: model_config.stop,
             presence_penalty: request.sampling.presence_penalty.unwrap_or(0.0),
             frequency_penalty: request.sampling.frequency_penalty.unwrap_or(0.0),
@@ -1863,7 +2114,7 @@ impl ModelManager {
 
         let model_config = self.get_model(model.as_str()).await?;
         let has_vision_input = validate_vision_request(&request, &model_config)?;
-        if has_vision_input && !self.uses_managed_llama_server() {
+        if has_vision_input && !self.uses_managed_llama_server_for(&model_config) {
             return Err(crate::error::HoshikageError::VisionNotSupported);
         }
         request.stream = true;
@@ -1873,10 +2124,12 @@ impl ModelManager {
             request.max_output_tokens,
             model_config.n_ctx.unwrap_or(self.config.n_ctx),
         )?;
-        if !self.uses_managed_llama_server() {
-            return Err(crate::error::HoshikageError::ConfigError(
-                "Responses streaming requires the managed llama-server runtime".to_string(),
-            ));
+        if !self.uses_managed_llama_server_for(&model_config) {
+            request.stream = false;
+            let completion = self.complete_model_request(model, request).await?;
+            return Ok(Box::pin(futures_util::stream::iter(
+                buffered_completion_actions(completion).into_iter().map(Ok),
+            )));
         }
 
         let defaults = LlamaServerChatDefaults {
@@ -1902,7 +2155,7 @@ impl ModelManager {
                 "Prepared Tool Calling request"
             );
         }
-        let body = match mode {
+        let mut body = match mode {
             crate::model::ToolCallingMode::Json => {
                 build_generic_json_request(model, &request, &model_config, &defaults)?
             }
@@ -1926,17 +2179,20 @@ impl ModelManager {
             None
         };
         let lease = self.acquire_managed_llama_server(model.as_str()).await?;
-        self.managed_context_plan(
-            &lease,
-            &body,
-            request.max_output_tokens,
-            model_config.n_ctx.unwrap_or(self.config.n_ctx),
-        )
-        .await?;
+        let plan = self
+            .managed_context_plan(
+                &lease,
+                &body,
+                request.max_output_tokens.unwrap_or(0),
+                model_config.n_ctx.unwrap_or(self.config.n_ctx),
+            )
+            .await?;
+        apply_reasoning_budget(&mut body, &model_config, &request, plan);
         let first_timeout = std::time::Duration::from_secs(self.config.first_token_timeout_secs);
         let idle_timeout = std::time::Duration::from_secs(self.config.stream_idle_timeout_secs);
         let generation_timeout =
             std::time::Duration::from_secs(self.config.generation_timeout_secs);
+        let generation_started_at = Instant::now();
         let upstream = tokio::time::timeout(first_timeout, self.send_managed_chat(&lease, &body))
             .await
             .map_err(|_| crate::error::HoshikageError::UpstreamTimeout)??;
@@ -1956,12 +2212,15 @@ impl ModelManager {
             first_timeout,
             generation_timeout,
         };
+        let metric_model = model.clone();
+        let metrics = Arc::clone(&self.metrics);
         let stream = async_stream::try_stream! {
             let mut lease = Some(lease);
             let mut upstream = upstream.bytes_stream();
             let mut sse = LlamaServerSseDecoder::default();
-            let started_at = tokio::time::Instant::now();
+            let started_at = generation_started_at;
             let mut first_chunk = true;
+            let mut first_token_elapsed = None;
 
             match mode {
                 crate::model::ToolCallingMode::Native
@@ -2004,6 +2263,13 @@ impl ModelManager {
                             }
                             Err(error) => Err(error)?,
                         };
+                        if first_token_elapsed.is_none()
+                            && deltas.iter().any(|delta| {
+                                !matches!(delta, ModelDelta::Usage(_) | ModelDelta::Finished(_))
+                            })
+                        {
+                            first_token_elapsed = Some(started_at.elapsed());
+                        }
                         for delta in deltas {
                             let actions = match strategy.push(delta) {
                                 Ok(actions) => actions,
@@ -2047,6 +2313,18 @@ impl ModelManager {
                     } else {
                         sse.finish()?;
                         let completion = strategy.finish()?;
+                        let usage = match &completion {
+                            ModelStreamAction::Complete { usage } => usage.clone(),
+                            _ => Err(crate::error::HoshikageError::ResponseTranslationFailed)?,
+                        };
+                        log_generation_metrics(
+                            &metrics,
+                            &metric_model,
+                            mode,
+                            started_at.elapsed(),
+                            first_token_elapsed,
+                            usage,
+                        );
                         for action in attempt_buffer.commit(completion) {
                             yield action;
                         }
@@ -2071,7 +2349,15 @@ impl ModelManager {
                         let chunk = chunk
                             .map_err(|_| crate::error::HoshikageError::UpstreamDisconnected)?;
                         first_chunk = false;
-                        for delta in sse.push(&chunk)? {
+                        let deltas = sse.push(&chunk)?;
+                        if first_token_elapsed.is_none()
+                            && deltas.iter().any(|delta| {
+                                !matches!(delta, ModelDelta::Usage(_) | ModelDelta::Finished(_))
+                            })
+                        {
+                            first_token_elapsed = Some(started_at.elapsed());
+                        }
+                        for delta in deltas {
                             match delta {
                                 ModelDelta::Text(fragment) => content.push_str(&fragment),
                                 ModelDelta::Usage(measured) => usage = Some(measured),
@@ -2099,6 +2385,14 @@ impl ModelManager {
                         &validation_request,
                         &model_config,
                     )?;
+                    log_generation_metrics(
+                        &metrics,
+                        &metric_model,
+                        mode,
+                        started_at.elapsed(),
+                        first_token_elapsed,
+                        completion_usage(&completion),
+                    );
                     for action in buffered_completion_actions(completion) {
                         yield action;
                     }
@@ -2126,10 +2420,12 @@ impl ModelManager {
             .managed_context_plan(
                 lease,
                 body,
-                request.max_output_tokens,
+                request.max_output_tokens.unwrap_or(0),
                 model_config.n_ctx.unwrap_or(self.config.n_ctx),
             )
             .await?;
+        let mut body = body.clone();
+        apply_reasoning_budget(&mut body, model_config, request, plan);
         tracing::debug!(
             model = model.as_str(),
             input_tokens = plan.input_tokens,
@@ -2138,7 +2434,8 @@ impl ModelManager {
             accuracy = ?plan.accuracy,
             "Validated Responses context plan"
         );
-        let upstream = match self.send_managed_chat(lease, body).await {
+        let generation_started_at = Instant::now();
+        let upstream = match self.send_managed_chat(lease, &body).await {
             Ok(response) => response,
             Err(error) => {
                 self.mark_managed_lease_unhealthy(
@@ -2176,7 +2473,16 @@ impl ModelManager {
                 completion
             }
         };
-        validate_native_completion(completion, request, model_config)
+        let completion = validate_native_completion(completion, request, model_config)?;
+        log_generation_metrics(
+            &self.metrics,
+            model,
+            mode,
+            generation_started_at.elapsed(),
+            None,
+            completion_usage(&completion),
+        );
+        Ok(completion)
     }
 
     async fn managed_context_plan(
@@ -2286,7 +2592,7 @@ impl ModelManager {
         &self,
         model_name: String,
         prompt: String,
-        params: InferenceParams,
+        mut params: InferenceParams,
         sender: tokio::sync::mpsc::UnboundedSender<Result<String>>,
     ) -> Result<()> {
         let _permit =
@@ -2312,6 +2618,15 @@ impl ModelManager {
         let backend = state.backend.as_ref().ok_or_else(|| {
             crate::error::HoshikageError::InferenceError("Model not loaded".to_string())
         })?;
+        let prompt_tokens = backend.count_tokens(&prompt)? as u32;
+        let context_window = model_config.n_ctx.unwrap_or(self.config.n_ctx);
+        let available_output_tokens = context_window.saturating_sub(prompt_tokens);
+        if available_output_tokens == 0 {
+            return Err(crate::error::HoshikageError::ContextLengthExceeded);
+        }
+        params.max_tokens = params
+            .max_tokens
+            .min(available_output_tokens.min(i32::MAX as u32) as i32);
 
         let thinking_decision = ThinkingController::decide(&model_config.thinking);
         let mut stream_filter = ThinkingStreamFilter::new(&thinking_decision);
@@ -2354,11 +2669,14 @@ impl ModelManager {
     }
 
     pub async fn is_diffusion_model(&self, model_name: &str) -> Result<bool> {
-        if self.uses_managed_llama_server() {
+        let model_config = self.get_model(model_name).await?;
+        if model_config.generation == GenerationMode::Diffusion {
+            return Ok(true);
+        }
+        if self.uses_managed_llama_server_for(&model_config) {
             return Ok(false);
         }
 
-        let model_config = self.get_model(model_name).await?;
         let mut state = self
             .inference
             .lock()
@@ -2538,7 +2856,7 @@ impl ModelManager {
         model_name: &str,
         model_config: &ModelConfig,
     ) -> Result<()> {
-        if self.uses_managed_llama_server() {
+        if self.uses_managed_llama_server_for(model_config) {
             return Err(crate::error::HoshikageError::ConfigError(
                 "prompt-based FFI inference path is disabled while HOSHIKAGE_RUNTIME_BACKEND=llama-server-managed".to_string(),
             ));
@@ -2627,6 +2945,7 @@ impl ModelManager {
             },
             speculation: config.speculation.clone(),
             thinking: config.thinking.clone(),
+            llama_server: config.llama_server.clone(),
         }
     }
 

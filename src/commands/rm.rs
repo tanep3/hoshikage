@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::i18n::Language;
-use fs2::FileExt;
+use crate::{config::Config, model::ModelRegistry};
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -58,13 +58,12 @@ async fn remove_via_api(port: u16, name: String, language: Language) -> Result<(
     )))
 }
 
-fn remove_directly(name: String, language: Language) -> Result<()> {
-    let config_dir = dirs::config_dir().ok_or_else(|| {
-        crate::error::HoshikageError::ConfigError("Config directory not found".to_string())
-    })?;
-
-    let hoshikage_dir = config_dir.join("hoshikage");
-    let model_map_path = hoshikage_dir.join("model_map.json");
+async fn remove_directly_with_config(
+    name: String,
+    language: Language,
+    runtime_config: Config,
+) -> Result<()> {
+    let model_map_path = runtime_config.model_map_path()?;
 
     if !model_map_path.exists() {
         return Err(crate::error::HoshikageError::Other(
@@ -72,27 +71,15 @@ fn remove_directly(name: String, language: Language) -> Result<()> {
         ));
     }
 
-    use std::fs::OpenOptions;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&model_map_path)?;
-
-    file.try_lock_exclusive()
-        .map_err(|e| crate::error::HoshikageError::Other(format!("Failed to lock file: {}", e)))?;
-
-    let content = std::fs::read_to_string(&model_map_path)?;
-    let mut models: std::collections::HashMap<String, crate::model::ModelConfig> =
-        serde_json::from_str(&content)?;
-
-    if models.remove(&name).is_none() {
+    let registry = ModelRegistry::new(runtime_config);
+    if !registry.load().await? {
+        return Err(crate::error::HoshikageError::Other(
+            "Model map file not found".to_string(),
+        ));
+    }
+    if !registry.remove(&name).await? {
         return Err(crate::error::HoshikageError::ModelNotFound(name));
     }
-
-    let new_content = serde_json::to_string_pretty(&models)?;
-    std::fs::write(&model_map_path, &new_content)?;
 
     match language {
         Language::En => println!("Removed model: {name}"),
@@ -101,17 +88,68 @@ fn remove_directly(name: String, language: Language) -> Result<()> {
     Ok(())
 }
 
+async fn remove_directly(name: String, language: Language) -> Result<()> {
+    remove_directly_with_config(name, language, Config::load()?).await
+}
+
 pub async fn remove_model(label: String, port: u16, language: Language) -> Result<()> {
     if check_server_running(port).await {
         remove_via_api(port, label, language).await
     } else {
-        remove_directly(label, language)
+        remove_directly(label, language).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::model::ModelConfig;
+    use std::path::PathBuf;
+
+    fn test_model(name: &str) -> ModelConfig {
+        ModelConfig {
+            ..ModelConfig::new_legacy("/models".to_string(), format!("{name}.gguf"), Vec::new())
+        }
+    }
+
+    fn test_config(path: PathBuf) -> Config {
+        Config {
+            model_map_file: Some(path),
+            ..Config::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_remove_preserves_remaining_models_and_valid_json() {
+        let directory = std::env::temp_dir().join(format!("hoshikage-rm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("model_map.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&std::collections::HashMap::from([
+                ("keep".to_string(), test_model("keep")),
+                ("remove".to_string(), test_model("remove")),
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        remove_directly_with_config(
+            "remove".to_string(),
+            Language::En,
+            test_config(path.clone()),
+        )
+        .await
+        .unwrap();
+
+        let persisted: std::collections::HashMap<String, ModelConfig> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(persisted.contains_key("keep"));
+        assert!(!persisted.contains_key("remove"));
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn test_response_deserialization() {

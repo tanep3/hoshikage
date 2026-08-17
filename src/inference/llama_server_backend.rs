@@ -60,6 +60,10 @@ impl LlamaServerCommandSpec {
             args.push("on".to_string());
             args.push("--spec-draft-p-min".to_string());
             args.push("0.10".to_string());
+            if let Some(draft_n_max) = config.request.speculation.draft_n_max {
+                args.push("--spec-draft-n-max".to_string());
+                args.push(draft_n_max.get().to_string());
+            }
         }
 
         if let Some(draft_model) = config.request.draft_model.as_ref() {
@@ -85,11 +89,21 @@ impl LlamaServerCommandSpec {
             args.push("--sleep-idle-seconds".to_string());
             args.push(sleep_idle_secs.to_string());
         }
-        append_cache_type(&mut args, "--cache-type-k", config.cache_type_k);
-        append_cache_type(&mut args, "--cache-type-v", config.cache_type_v);
+        let cache_type_k = config
+            .request
+            .llama_server
+            .cache_type_k
+            .or(config.cache_type_k);
+        let cache_type_v = config
+            .request
+            .llama_server
+            .cache_type_v
+            .or(config.cache_type_v);
+        append_cache_type(&mut args, "--cache-type-k", cache_type_k);
+        append_cache_type(&mut args, "--cache-type-v", cache_type_v);
         if config.request.draft_model.is_some() {
-            append_cache_type(&mut args, "--cache-type-k-draft", config.cache_type_k);
-            append_cache_type(&mut args, "--cache-type-v-draft", config.cache_type_v);
+            append_cache_type(&mut args, "--cache-type-k-draft", cache_type_k);
+            append_cache_type(&mut args, "--cache-type-v-draft", cache_type_v);
         }
 
         Self {
@@ -205,6 +219,7 @@ mod tests {
             n_rs_seq: 0,
             speculation: SpeculationConfig::default(),
             thinking: ThinkingConfig::default(),
+            llama_server: crate::model::LlamaServerModelConfig::default(),
         }
     }
 
@@ -277,16 +292,46 @@ mod tests {
     }
 
     #[test]
+    fn bundle_cache_settings_override_global_defaults() {
+        let mut config = launch_config(base_request());
+        config.cache_type_k = Some(crate::config::KvCacheType::F16);
+        config.cache_type_v = Some(crate::config::KvCacheType::F16);
+        config.request.llama_server.cache_type_k = Some(crate::config::KvCacheType::Q8Zero);
+        config.request.llama_server.cache_type_v = Some(crate::config::KvCacheType::Q4Zero);
+
+        let spec = LlamaServerCommandSpec::from_launch_config(&config);
+
+        assert!(spec
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--cache-type-k", "q8_0"]));
+        assert!(spec
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--cache-type-v", "q4_0"]));
+        assert!(!spec
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--cache-type-k", "f16"]));
+        assert!(!spec
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--cache-type-v", "f16"]));
+    }
+
+    #[test]
     fn command_spec_includes_vision_speculation_and_thinking_options() {
         let mut request = base_request();
         request.mmproj = Some(PathBuf::from("/models/mmproj.gguf"));
         request.draft_model = Some(PathBuf::from("/models/draft.gguf"));
         request.speculation = SpeculationConfig {
             modes: vec![SpeculationMode::Mtp, SpeculationMode::DraftModel],
+            draft_n_max: std::num::NonZeroU32::new(6),
             fallback: FallbackMode::Warn,
         };
         request.thinking = ThinkingConfig {
             mode: ThinkingMode::Off,
+            ..ThinkingConfig::default()
         };
 
         let spec = LlamaServerCommandSpec::from_launch_config(&launch_config(request));
@@ -304,6 +349,10 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair == ["--spec-draft-p-min", "0.10"]));
+        assert!(spec
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--spec-draft-n-max", "6"]));
         assert!(spec
             .args
             .windows(2)

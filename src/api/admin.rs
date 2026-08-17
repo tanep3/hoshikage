@@ -1,5 +1,6 @@
 use crate::model::{
-    ModelConfig, SpeculationConfig, SpeculationMode, ThinkingConfig, ToolCallingConfig,
+    GenerationMode, LlamaServerModelConfig, ModelConfig, SpeculationConfig, SpeculationMode,
+    ThinkingConfig, ToolCallingConfig,
 };
 use axum::{
     extract::{Path, State},
@@ -22,6 +23,8 @@ pub struct AddModelRequest {
     pub speculation: SpeculationConfig,
     #[serde(default)]
     pub thinking: ThinkingConfig,
+    #[serde(default)]
+    pub generation: GenerationMode,
     #[serde(
         default,
         skip_serializing_if = "ToolCallingConfig::is_disabled_default"
@@ -31,6 +34,8 @@ pub struct AddModelRequest {
     pub n_ctx: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n_gpu_layers: Option<i32>,
+    #[serde(default)]
+    pub llama_server: LlamaServerModelConfig,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,22 +64,27 @@ pub async fn add_model(
         .unwrap_or(".")
         .to_string();
 
-    let mut speculation = req.speculation;
-    if speculation.is_off() && req.drafter.is_some() {
-        speculation.modes = vec![SpeculationMode::Mtp];
-    }
-    if req.drafter.is_none() {
-        speculation.modes.clear();
-    }
+    let speculation =
+        match normalize_speculation_registration(req.speculation, req.drafter.is_some()) {
+            Ok(speculation) => speculation,
+            Err(message) => {
+                return Json(AddModelResponse {
+                    success: false,
+                    message,
+                })
+            }
+        };
 
     let config = ModelConfig {
         mmproj: req.mmproj,
         drafter: req.drafter,
         speculation,
         thinking: req.thinking,
+        generation: req.generation,
         tool_calling: req.tool_calling,
         n_ctx: req.n_ctx,
         n_gpu_layers: req.n_gpu_layers,
+        llama_server: req.llama_server,
         ..ModelConfig::new_legacy(model_dir, model_file, req.stop)
     };
 
@@ -92,6 +102,22 @@ pub async fn add_model(
             })
         }
     }
+}
+
+fn normalize_speculation_registration(
+    mut speculation: SpeculationConfig,
+    has_drafter: bool,
+) -> Result<SpeculationConfig, String> {
+    if speculation.is_off() && has_drafter {
+        speculation.modes = vec![SpeculationMode::Mtp];
+    }
+    if speculation.draft_n_max.is_some() && speculation.is_off() {
+        return Err("speculation.draft_n_max requires an enabled speculation mode".to_string());
+    }
+    if speculation.has_mode(SpeculationMode::DraftModel) && !has_drafter {
+        return Err("draft_model speculation requires a drafter path".to_string());
+    }
+    Ok(speculation)
 }
 
 pub async fn remove_model(
@@ -147,14 +173,18 @@ mod tests {
             drafter: None,
             speculation: SpeculationConfig {
                 modes: Vec::new(),
+                draft_n_max: None,
                 fallback: FallbackMode::Warn,
             },
             thinking: ThinkingConfig {
                 mode: ThinkingMode::Off,
+                ..ThinkingConfig::default()
             },
+            generation: GenerationMode::Autoregressive,
             tool_calling: ToolCallingConfig::default(),
             n_ctx: Some(8192),
             n_gpu_layers: Some(-1),
+            llama_server: LlamaServerModelConfig::default(),
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -186,5 +216,21 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("false"));
         assert!(json.contains("Test error"));
+    }
+
+    #[test]
+    fn built_in_mtp_registration_survives_without_a_drafter_path() {
+        let speculation = normalize_speculation_registration(
+            SpeculationConfig {
+                modes: vec![SpeculationMode::Mtp],
+                draft_n_max: std::num::NonZeroU32::new(6),
+                fallback: FallbackMode::Strict,
+            },
+            false,
+        )
+        .unwrap();
+
+        assert!(speculation.has_mode(SpeculationMode::Mtp));
+        assert_eq!(speculation.draft_n_max.map(|value| value.get()), Some(6));
     }
 }
