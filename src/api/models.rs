@@ -13,6 +13,8 @@ pub struct ModelData {
     pub object: String,
     pub created: i64,
     pub owned_by: String,
+    #[serde(default)]
+    pub supported_reasoning_levels: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,6 +127,7 @@ pub async fn models(
             object: "model".to_string(),
             created: 1686935002,
             owned_by: "tane".to_string(),
+            supported_reasoning_levels: Vec::new(),
         })
         .collect();
     let models = model_infos
@@ -213,6 +216,7 @@ mod tests {
             object: "model".to_string(),
             created: 1686935002,
             owned_by: "tane".to_string(),
+            supported_reasoning_levels: Vec::new(),
         };
 
         let json = serde_json::to_string(&data).unwrap();
@@ -228,6 +232,7 @@ mod tests {
                 object: "model".to_string(),
                 created: 1686935002,
                 owned_by: "tane".to_string(),
+                supported_reasoning_levels: Vec::new(),
             }],
             models: vec![CodexModelData::new(
                 "test-model".to_string(),

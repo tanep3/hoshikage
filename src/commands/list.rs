@@ -10,6 +10,8 @@ struct ModelData {
     pub object: String,
     pub created: i64,
     pub owned_by: String,
+    #[serde(default)]
+    pub supported_reasoning_levels: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,7 +203,7 @@ mod tests {
         let json = r#"{
             "object": "list",
             "data": [
-                {"id": "model1", "object": "model", "created": 123, "owned_by": "tane"}
+                {"id": "model1", "object": "model", "created": 123, "owned_by": "tane", "supported_reasoning_levels": []}
             ]
         }"#;
         let resp: ModelListResponse = serde_json::from_str(json).unwrap();
