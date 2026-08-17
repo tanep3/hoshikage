@@ -178,6 +178,25 @@ Thinking Onは低レイテンシ化の対象とはしない。ただし、有限
 消費して最終回答が空になることは正常完了ではない。`min_final_tokens`は速度制約ではなく、
 最終回答を成立させるための予約量として扱う。
 
+### 4.6 上位Provider向けモデルカタログ
+
+Hoshikageはモデル実行Providerであり、Agent Loopやモデル選択ポリシーは上位層が担当する。
+そのため、Hoshikageは登録済みBundleを一覧化する二つのAPIを提供する。
+
+| API | 用途 | 内容 |
+|---|---|---|
+| `GET /v1/models` | OpenAI互換Provider discovery | `data[].id`を中心とした公開カタログ |
+| `GET /v1/hoshikage/models` | Hoshikage-aware discovery | context、Tool、Vision、Thinking、reasoning budget等 |
+
+`/v1/models`の`data[].id`はResponses APIの`model`へそのまま渡せる値とする。
+`supported_reasoning_levels`は、Hoshikageがrequest単位のreasoning effortを解釈しない限り
+空配列を返す。Thinking On Bundleが存在することと、Codexのreasoning effortパラメータを
+受け付けることは別の能力であるため、能力を推測して広告してはならない。
+
+上位Proxyは`/v1/models`を起動時または明示refresh時に取得し、公開モデルIDを生成する。
+モデルの運用ポリシー（通常ChatでThinking On、バッチでThinking Off等）はProxy側で
+モデルIDを選択して実現し、Hoshikageはその選択を上書きしない。
+
 新規Thinking On Bundleの製品既定値は、`max_reasoning_tokens = 32768`、
 `min_final_tokens = 8192`とする。この値はGemma 4を含む特定モデルの推奨値ではなく、
 登録時に変更可能な運用既定値である。reasoningを固定長で制限したくないBundleは

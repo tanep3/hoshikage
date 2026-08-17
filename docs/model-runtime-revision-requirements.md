@@ -458,6 +458,28 @@ Thinking Offといった用途差を、モデルごとのBundle設定として�
 - Thinking Off Bundleでは reasoning budget 0相当をruntimeへ適用する。
 - 未指定の既存Bundleは `thinking.mode = "auto"` とし、従来動作を維持する。
 
+### MR-015: 上位Provider向け動的モデルカタログ
+
+Hoshikageを上位のAgent Proxyから動的に利用するため、モデル一覧APIは登録済みBundleを
+再起動なしで取得できる情報源として扱う。
+
+**要件:**
+- `GET /v1/models` はOpenAI互換の `object: "list"` と `data` 配列を返す。
+- `data[].id` は、Responses APIで指定可能なBundle名と一致する。
+- `data[]` には `supported_reasoning_levels` を必ず含める。Hoshikageがrequest単位の
+  reasoning effortを解釈しない場合は空配列とし、未対応能力を広告しない。
+- `GET /v1/models` の取得結果だけで、上位ProviderがモデルIDを動的登録できる。
+- Bundleの詳細能力、Thinking設定、Tool Calling mode、Vision対応は
+  `GET /v1/hoshikage/models` で取得できる。
+- カタログ情報はモデル名、設定値、ファイルパスなどの秘密情報を含めない。
+- 認証が有効なLAN公開では、これらの一覧APIもBearer Tokenの対象とする。
+
+**受け入れ条件:**
+- Hoshikageに登録済みの全Bundleが `/v1/models.data` に現れる。
+- `/v1/models.data[].id` をそのまま `/v1/responses.model` に指定できる。
+- Thinking On/OffやVisionの能力が異なるBundleを同時登録しても、各IDが混同されない。
+- Proxyが一覧取得に失敗しても、Hoshikageの推論API自体の応答契約は変わらない。
+
 **受け入れ条件:**
 - `hoshikage add /path/to/model.gguf label --thinking-off` で Thinking 無効モデルとして登録できる。
 - `hoshikage add /path/to/model.gguf label --thinking-mode on
