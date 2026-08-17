@@ -1353,6 +1353,48 @@ fn apply_reasoning_budget(
     }
 }
 
+fn completion_usage(completion: &ModelCompletion) -> TokenUsage {
+    match completion {
+        ModelCompletion::Text { usage, .. } | ModelCompletion::ToolCall { usage, .. } => {
+            usage.clone()
+        }
+    }
+}
+
+fn log_generation_metrics(
+    model: &crate::conversation::ModelId,
+    mode: crate::model::ToolCallingMode,
+    elapsed: Duration,
+    usage: TokenUsage,
+) {
+    let (input_tokens, output_tokens) = match usage {
+        TokenUsage::Measured {
+            input_tokens,
+            output_tokens,
+        }
+        | TokenUsage::Estimated {
+            input_tokens,
+            output_tokens,
+        } => (input_tokens, output_tokens),
+    };
+    let elapsed_seconds = elapsed.as_secs_f64();
+    let generation_tokens_per_second = if elapsed_seconds > 0.0 {
+        f64::from(output_tokens) / elapsed_seconds
+    } else {
+        0.0
+    };
+    tracing::info!(
+        target: "hoshikage::metrics",
+        model = model.as_str(),
+        tool_calling_mode = ?mode,
+        input_tokens,
+        output_tokens,
+        total_elapsed_ms = elapsed.as_millis() as u64,
+        generation_tokens_per_second,
+        "inference metrics"
+    );
+}
+
 impl ModelManager {
     pub fn new(config: Config) -> Self {
         let managed_runtime = RuntimeCoordinator::new(
@@ -2320,6 +2362,7 @@ impl ModelManager {
             accuracy = ?plan.accuracy,
             "Validated Responses context plan"
         );
+        let generation_started_at = Instant::now();
         let upstream = match self.send_managed_chat(lease, &body).await {
             Ok(response) => response,
             Err(error) => {
@@ -2358,7 +2401,14 @@ impl ModelManager {
                 completion
             }
         };
-        validate_native_completion(completion, request, model_config)
+        let completion = validate_native_completion(completion, request, model_config)?;
+        log_generation_metrics(
+            model,
+            mode,
+            generation_started_at.elapsed(),
+            completion_usage(&completion),
+        );
+        Ok(completion)
     }
 
     async fn managed_context_plan(
