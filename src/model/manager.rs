@@ -827,6 +827,27 @@ mod config_tests {
     }
 
     #[test]
+    fn model_metadata_exposes_bundle_thinking_budget() {
+        let mut config = ModelConfig::new_legacy(
+            "/models".to_string(),
+            "thinking.gguf".to_string(),
+            Vec::new(),
+        );
+        config.thinking = ThinkingConfig {
+            mode: ThinkingMode::On,
+            max_reasoning_tokens: Some(32_768),
+            min_final_tokens: 8_192,
+        };
+
+        let info = HoshikageModelInfo::from_bundle("thinking".to_string(), config, 32_768, false);
+
+        assert_eq!(info.thinking, ThinkingMode::On);
+        assert_eq!(info.max_reasoning_tokens, Some(32_768));
+        assert_eq!(info.min_final_tokens, 8_192);
+        assert!(info.reasoning);
+    }
+
+    #[test]
     fn semantic_retry_budget_selects_one_json_attempt() {
         let mut config =
             ModelConfig::new_legacy("/models".to_string(), "model.gguf".to_string(), Vec::new());
@@ -1182,6 +1203,9 @@ pub struct HoshikageModelInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec_draft_n_max: Option<u32>,
     pub thinking: ThinkingMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_reasoning_tokens: Option<u32>,
+    pub min_final_tokens: u32,
     pub fallback: FallbackMode,
     pub reasoning: bool,
     pub tool_calling_mode: crate::model::ToolCallingMode,
@@ -1231,6 +1255,8 @@ impl HoshikageModelInfo {
                 && config.drafter.is_some(),
             spec_draft_n_max: config.speculation.draft_n_max.map(NonZeroU32::get),
             thinking: config.thinking.mode,
+            max_reasoning_tokens: config.thinking.max_reasoning_tokens,
+            min_final_tokens: config.thinking.min_final_tokens,
             fallback: config.speculation.fallback,
             reasoning,
             tool_calling_mode: config.tool_calling.mode,
