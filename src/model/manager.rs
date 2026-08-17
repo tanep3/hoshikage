@@ -1169,6 +1169,18 @@ pub struct RuntimeStatusSnapshot {
     pub active_requests: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct InferenceMetricsSnapshot {
+    pub model: String,
+    pub tool_calling_mode: crate::model::ToolCallingMode,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub total_elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
+    pub generation_tokens_per_second: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LoadedRuntimeInfoSnapshot {
     pub main_model_loaded: bool,
@@ -1320,6 +1332,7 @@ pub struct ModelManager {
     semaphore: Arc<Semaphore>,
     managed_runtime: RuntimeCoordinator,
     llama_server_client: LlamaServerClient,
+    metrics: Arc<Mutex<Option<InferenceMetricsSnapshot>>>,
 }
 
 fn apply_reasoning_budget(
@@ -1362,6 +1375,7 @@ fn completion_usage(completion: &ModelCompletion) -> TokenUsage {
 }
 
 fn log_generation_metrics(
+    metrics: &Arc<Mutex<Option<InferenceMetricsSnapshot>>>,
     model: &crate::conversation::ModelId,
     mode: crate::model::ToolCallingMode,
     elapsed: Duration,
@@ -1384,15 +1398,27 @@ fn log_generation_metrics(
     } else {
         0.0
     };
+    let snapshot = InferenceMetricsSnapshot {
+        model: model.as_str().to_string(),
+        tool_calling_mode: mode,
+        input_tokens,
+        output_tokens,
+        total_elapsed_ms: elapsed.as_millis() as u64,
+        ttft_ms: first_token_elapsed.map(|value| value.as_millis() as u64),
+        generation_tokens_per_second,
+    };
+    if let Ok(mut current) = metrics.lock() {
+        *current = Some(snapshot.clone());
+    }
     tracing::info!(
         target: "hoshikage::metrics",
         model = model.as_str(),
         tool_calling_mode = ?mode,
         input_tokens,
         output_tokens,
-        total_elapsed_ms = elapsed.as_millis() as u64,
-        ttft_ms = first_token_elapsed.map(|value| value.as_millis() as u64),
-        generation_tokens_per_second,
+        total_elapsed_ms = snapshot.total_elapsed_ms,
+        ttft_ms = snapshot.ttft_ms,
+        generation_tokens_per_second = snapshot.generation_tokens_per_second,
         "inference metrics"
     );
 }
@@ -1419,7 +1445,12 @@ impl ModelManager {
             semaphore: Arc::new(Semaphore::new(1)),
             managed_runtime,
             llama_server_client: LlamaServerClient::new(),
+            metrics: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn inference_metrics(&self) -> Option<InferenceMetricsSnapshot> {
+        self.metrics.lock().ok().and_then(|metrics| metrics.clone())
     }
 
     pub async fn send_managed_chat(
@@ -2182,6 +2213,7 @@ impl ModelManager {
             generation_timeout,
         };
         let metric_model = model.clone();
+        let metrics = Arc::clone(&self.metrics);
         let stream = async_stream::try_stream! {
             let mut lease = Some(lease);
             let mut upstream = upstream.bytes_stream();
@@ -2286,6 +2318,7 @@ impl ModelManager {
                             _ => Err(crate::error::HoshikageError::ResponseTranslationFailed)?,
                         };
                         log_generation_metrics(
+                            &metrics,
                             &metric_model,
                             mode,
                             started_at.elapsed(),
@@ -2353,6 +2386,7 @@ impl ModelManager {
                         &model_config,
                     )?;
                     log_generation_metrics(
+                        &metrics,
                         &metric_model,
                         mode,
                         started_at.elapsed(),
@@ -2441,6 +2475,7 @@ impl ModelManager {
         };
         let completion = validate_native_completion(completion, request, model_config)?;
         log_generation_metrics(
+            &self.metrics,
             model,
             mode,
             generation_started_at.elapsed(),

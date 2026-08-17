@@ -147,6 +147,8 @@ pub struct StatusResponse {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<crate::model::RuntimeStatusSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inference_metrics: Option<crate::model::InferenceMetricsSnapshot>,
 }
 
 pub async fn status(
@@ -155,6 +157,7 @@ pub async fn status(
     Json(StatusResponse {
         status: "ok".to_string(),
         runtime: Some(manager.runtime_status()),
+        inference_metrics: manager.inference_metrics(),
     })
 }
 
@@ -266,6 +269,7 @@ mod tests {
         let response = StatusResponse {
             status: "ok".to_string(),
             runtime: None,
+            inference_metrics: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
